@@ -462,7 +462,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 # ============== КОМАНДЫ ==============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ Привет! Я на Cerebras — самый быстрый AI.\n"
+        "⚡ Привет! Я на Luna — самый быстрый AI.\n"
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки и искать видео на YouTube!\n\n"
         "Нажми на кнопки ниже, чтобы попробовать:",
