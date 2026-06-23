@@ -77,7 +77,7 @@ user_names: Dict[int, str] = {}
 user_settings: Dict[int, Dict] = {}
 last_request_time: Dict[int, float] = {}
 reminders: Dict[int, List[Tuple[float, str, int]]] = {}
-user_violations: Dict[int, Dict] = {}  # для ручной модерации /warn
+user_violations: Dict[int, Dict] = {}
 user_message_count: Dict[int, int] = {}
 MAX_MEMORY = 20
 
@@ -200,7 +200,6 @@ def format_time(seconds: int) -> str:
         return f"⏱️ {seconds//86400} дней"
 
 async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Проверяет сообщение на мат и применяет санкции (если включено). Возвращает True, если сообщение было нарушением."""
     global AUTO_MODERATION_ENABLED
     if not AUTO_MODERATION_ENABLED:
         return False
@@ -214,7 +213,6 @@ async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not contains_bad_words(text):
         return False
     
-    # Проверка на уже существующий бан
     if user_id in user_violations:
         ban_until = user_violations[user_id].get("ban_until", 0)
         if ban_until > time.time():
@@ -275,7 +273,6 @@ async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ============== КОМАНДА УПРАВЛЕНИЯ МОДЕРАЦИЕЙ ==============
 async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Включение/выключение автоматической модерации (только владелец)."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец может управлять модерацией.")
@@ -890,7 +887,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ========== АВТОМАТИЧЕСКАЯ МОДЕРАЦИЯ ==========
         if await apply_moderation(update, context):
-            return  # сообщение было нарушением, не обрабатываем дальше
+            return
 
         user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
         add_chat_member(chat_id, user_id, user_name)
@@ -903,7 +900,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             add_to_user_memory(user_id, text)
             logger.info(f"💬 Личное сообщение от {user_name}")
         elif chat_type in [Chat.GROUP, Chat.SUPERGROUP]:
-            # Проверяем упоминания
             if message.entities:
                 for entity in message.entities:
                     if entity.type == "mention":
@@ -920,13 +916,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             logger.info(f"✅ Text_mention от бота")
                             break
 
-            # Если не нашли в entities, проверяем начало текста
             if not should_reply and text.lower().startswith(f"@{bot_username.lower()}"):
                 should_reply = True
                 text = text.replace(f"@{bot_username}", "").strip()
                 logger.info(f"✅ Упоминание в начале текста")
 
-            # Проверка ответа на сообщение бота
             if not should_reply and message.reply_to_message:
                 if message.reply_to_message.from_user.id == context.bot.id:
                     should_reply = True
@@ -1094,6 +1088,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         application.add_handler(CallbackQueryHandler(button_callback))
 
+        # Правильный способ создать фоновую задачу
         loop = asyncio.get_event_loop()
         loop.create_task(check_reminders(application))
 
