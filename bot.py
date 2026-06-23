@@ -1,4 +1,4 @@
-# bot.py - Бот с автоматической модерацией, управлением только для владельца
+# bot.py - Исправленная версия с классическим запуском polling
 
 import os
 import asyncio
@@ -39,7 +39,6 @@ if not CEREBRAS_API_KEY:
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID")) if os.getenv("OWNER_USER_ID") else None
 
 # ============== НАСТРОЙКИ МОДЕРАЦИИ ==============
-# По умолчанию модерация включена. Изменить может только владелец.
 AUTO_MODERATION_ENABLED = True
 
 logging.basicConfig(
@@ -1067,58 +1066,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ============== ЗАПУСК ==============
+# ============== ЗАПУСК (классический, рабочий) ==============
 def main():
+    logger.info("▶️ Инициализация приложения...")
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("members", members_command))
+    application.add_handler(CommandHandler("mode", mode_command))
+    application.add_handler(CommandHandler("weather", weather_command))
+    application.add_handler(CommandHandler("imagine", imagine_command))
+    application.add_handler(CommandHandler("yt", yt_command))
+    application.add_handler(CommandHandler("remind", remind_command))
+    application.add_handler(CommandHandler("warn", warn_command))
+    application.add_handler(CommandHandler("unban", unban_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("setmoderation", set_moderation_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Запускаем фоновую задачу напоминаний в отдельном цикле
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_reminders(application))
+    logger.info("✅ Задача напоминаний запущена")
+
+    if OWNER_USER_ID:
+        logger.info(f"👑 Владелец бота установлен (ID: {OWNER_USER_ID})")
+    else:
+        logger.warning("⚠️ Владелец бота не установлен (OWNER_USER_ID = None)")
+
+    logger.info("🚀 Бот запущен на Cerebras API!")
+    logger.info("⚡ Скорость: ~2,000 токенов/сек")
+    logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
+    logger.info("💬 Режимы: быстрый, умный, саркастичный, флирт")
+    logger.info("🧘 Анализ эмоций включён")
+    logger.info("📝 Напоминания активны")
+    logger.info("🛡️ Модерация: автоматическая + ручная (/warn, /unban)")
+    logger.info(f"⚙️ Авто-модерация: {'включена' if AUTO_MODERATION_ENABLED else 'выключена'}")
+    logger.info("🔘 Инлайн-клавиатуры активны")
+    logger.info("🌤️ Погода подключена")
+    logger.info("🎨 Генерация изображений подключена (Pollinations.ai)")
+    logger.info("🎬 YouTube поиск подключён (YouTube API)")
+    logger.info("👤 /warn, /unban и /setmoderation только для владельца")
+    logger.info("📌 Бот отвечает на упоминания в группах")
+    logger.info("🔄 Запуск polling...")
+
+    # Запускаем polling (это блокирующий вызов)
     try:
-        application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("reset", reset_command))
-        application.add_handler(CommandHandler("members", members_command))
-        application.add_handler(CommandHandler("mode", mode_command))
-        application.add_handler(CommandHandler("weather", weather_command))
-        application.add_handler(CommandHandler("imagine", imagine_command))
-        application.add_handler(CommandHandler("yt", yt_command))
-        application.add_handler(CommandHandler("remind", remind_command))
-        application.add_handler(CommandHandler("warn", warn_command))
-        application.add_handler(CommandHandler("unban", unban_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("setmoderation", set_moderation_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.add_handler(CallbackQueryHandler(button_callback))
-
-        # Правильный способ создать фоновую задачу
-        loop = asyncio.get_event_loop()
-        loop.create_task(check_reminders(application))
-
-        if OWNER_USER_ID:
-            logger.info(f"👑 Владелец бота установлен (ID: {OWNER_USER_ID})")
-        else:
-            logger.warning("⚠️ Владелец бота не установлен (OWNER_USER_ID = None)")
-
-        logger.info("🚀 Бот запущен на Cerebras API!")
-        logger.info("⚡ Скорость: ~2,000 токенов/сек")
-        logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
-        logger.info("💬 Режимы: быстрый, умный, саркастичный, флирт")
-        logger.info("🧘 Анализ эмоций включён")
-        logger.info("📝 Напоминания активны")
-        logger.info("🛡️ Модерация: автоматическая + ручная (/warn, /unban)")
-        logger.info(f"⚙️ Авто-модерация: {'включена' if AUTO_MODERATION_ENABLED else 'выключена'}")
-        logger.info("🔘 Инлайн-клавиатуры активны")
-        logger.info("🌤️ Погода подключена")
-        logger.info("🎨 Генерация изображений подключена (Pollinations.ai)")
-        logger.info("🎬 YouTube поиск подключён (YouTube API)")
-        logger.info("👤 /warn, /unban и /setmoderation только для владельца")
-        logger.info("📌 Бот отвечает на упоминания в группах")
-
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            close_loop=False
         )
-
     except Exception as e:
-        logger.error(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка polling: {e}")
         raise
 
 if __name__ == "__main__":
