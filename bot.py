@@ -1,4 +1,4 @@
-# bot.py - Исправленная версия с классическим запуском polling
+# bot.py - Исправленная версия с поддержкой Python 3.14
 
 import os
 import asyncio
@@ -1066,7 +1066,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ============== ЗАПУСК (классический, рабочий) ==============
+# ============== ЗАПУСК (исправлен для Python 3.14) ==============
 def main():
     logger.info("▶️ Инициализация приложения...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1087,8 +1087,11 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    # Запускаем фоновую задачу напоминаний в отдельном цикле
-    loop = asyncio.get_event_loop()
+    # Создаём новый цикл событий и устанавливаем его как текущий (для Python 3.14)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Запускаем фоновую задачу напоминаний
     loop.create_task(check_reminders(application))
     logger.info("✅ Задача напоминаний запущена")
 
@@ -1113,7 +1116,7 @@ def main():
     logger.info("📌 Бот отвечает на упоминания в группах")
     logger.info("🔄 Запуск polling...")
 
-    # Запускаем polling (это блокирующий вызов)
+    # Запускаем polling в том же цикле
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
