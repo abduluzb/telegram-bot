@@ -1,4 +1,4 @@
-# bot.py - Исправленная версия с поддержкой Python 3.14
+# bot.py - Luna AI (полная версия с модерацией заявок на вступление)
 
 import os
 import asyncio
@@ -17,6 +17,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ChatJoinRequestHandler,
     filters,
     ContextTypes,
 )
@@ -37,9 +38,10 @@ if not CEREBRAS_API_KEY:
     raise ValueError("❌ CEREBRAS_API_KEY не найден в .env файле!")
 
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID")) if os.getenv("OWNER_USER_ID") else None
-
-# ============== НАСТРОЙКИ МОДЕРАЦИИ ==============
 AUTO_MODERATION_ENABLED = True
+
+# Глобальный словарь для хранения активных запросов на вступление
+pending_requests = {}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -438,6 +440,53 @@ async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка YouTube API: {e}")
         await status_msg.edit_text("⚠️ Ошибка поиска на YouTube. Попробуйте позже.")
 
+# ============== ОБРАБОТЧИК ЗАЯВОК НА ВСТУПЛЕНИЕ ==============
+async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка запроса на вступление в группу"""
+    join_request = update.chat_join_request
+    user = join_request.from_user
+    chat = join_request.chat
+
+    if not OWNER_USER_ID:
+        logger.warning("Владелец не задан, автоматически одобряем")
+        try:
+            await join_request.approve()
+        except Exception as e:
+            logger.error(f"Ошибка автоматического одобрения: {e}")
+        return
+
+    # Отправляем уведомление владельцу
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Принять", callback_data=f"approve_{user.id}_{chat.id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"decline_{user.id}_{chat.id}"),
+        ]
+    ])
+
+    msg = (
+        f"👤 Новый запрос на вступление!\n"
+        f"Пользователь: {user.first_name} (@{user.username if user.username else 'нет username'})\n"
+        f"ID: {user.id}\n"
+        f"Группа: {chat.title} (ID: {chat.id})\n"
+        f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_USER_ID,
+            text=msg,
+            reply_markup=keyboard
+        )
+        # Сохраняем запрос в глобальном словаре
+        pending_requests[(user.id, chat.id)] = {
+            'user_id': user.id,
+            'chat_id': chat.id,
+            'join_request': join_request,
+            'timestamp': time.time()
+        }
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления владельцу: {e}")
+
 # ============== КНОПКИ ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
@@ -462,7 +511,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 # ============== КОМАНДЫ ==============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ Привет! Я на Luna — самый быстрый AI.\n"
+        "🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки и искать видео на YouTube!\n\n"
         "Нажми на кнопки ниже, чтобы попробовать:",
@@ -475,7 +524,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
     ])
     await update.message.reply_text(
-        "⚡ Бот на Cerebras.\n"
+        "🌙 Luna AI на Cerebras.\n"
         "• Отвечаю только когда меня упомянут @bot\n"
         "• Помню контекст чата\n"
         "• Анализирую эмоции\n"
@@ -802,6 +851,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         await query.edit_message_text(f"Режим: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
+    elif data.startswith("approve_"):
+        parts = data.split("_")
+        if len(parts) == 3:
+            user_id_req = int(parts[1])
+            chat_id_req = int(parts[2])
+            try:
+                request_key = (user_id_req, chat_id_req)
+                if request_key in pending_requests:
+                    await pending_requests[request_key]['join_request'].approve()
+                    await query.edit_message_text("✅ Запрос одобрен")
+                    del pending_requests[request_key]
+                else:
+                    await context.bot.approve_chat_join_request(chat_id=chat_id_req, user_id=user_id_req)
+                    await query.edit_message_text("✅ Запрос одобрен (по ID)")
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка: {e}")
+
+    elif data.startswith("decline_"):
+        parts = data.split("_")
+        if len(parts) == 3:
+            user_id_req = int(parts[1])
+            chat_id_req = int(parts[2])
+            try:
+                request_key = (user_id_req, chat_id_req)
+                if request_key in pending_requests:
+                    await pending_requests[request_key]['join_request'].decline()
+                    await query.edit_message_text("❌ Запрос отклонён")
+                    del pending_requests[request_key]
+                else:
+                    await context.bot.decline_chat_join_request(chat_id=chat_id_req, user_id=user_id_req)
+                    await query.edit_message_text("❌ Запрос отклонён (по ID)")
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка: {e}")
+
     elif data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -951,13 +1034,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context_text = build_context(chat_id, user_id, user_name)
 
         mode_prompts = {
-            "fast": f"""Ты — быстрый AI-помощник. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
+            "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.""",
 
-            "smart": f"""Ты — умный AI-помощник. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
+            "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.""",
 
-            "sarcastic": f"""Ты — саркастичный AI-ассистент с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
+            "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
 
 Основные правила:
 * Сначала польза, потом сарказм.
@@ -1001,7 +1084,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Ты в {location}""",
 
-            "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
+            "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
 
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности."""
         }
@@ -1049,7 +1132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"❌ Все модели не отвечают: {last_error}")
 
         add_to_user_memory(user_id, reply_text, "assistant")
-        add_to_chat_memory(chat_id, context.bot.id, "🤖 Бот", reply_text, "assistant")
+        add_to_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, "assistant")
 
         if len(reply_text) > 4000:
             for i in range(0, len(reply_text), 4000):
@@ -1066,9 +1149,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ============== ЗАПУСК (исправлен для Python 3.14) ==============
+# ============== ЗАПУСК ==============
 def main():
-    logger.info("▶️ Инициализация приложения...")
+    logger.info("▶️ Инициализация приложения Luna AI...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
@@ -1086,12 +1169,11 @@ def main():
     application.add_handler(CommandHandler("setmoderation", set_moderation_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
-    # Создаём новый цикл событий и устанавливаем его как текущий (для Python 3.14)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Запускаем фоновую задачу напоминаний
     loop.create_task(check_reminders(application))
     logger.info("✅ Задача напоминаний запущена")
 
@@ -1100,13 +1182,13 @@ def main():
     else:
         logger.warning("⚠️ Владелец бота не установлен (OWNER_USER_ID = None)")
 
-    logger.info("🚀 Бот запущен на Cerebras API!")
+    logger.info("🚀 Luna AI запущен на Cerebras API!")
     logger.info("⚡ Скорость: ~2,000 токенов/сек")
     logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
     logger.info("💬 Режимы: быстрый, умный, саркастичный, флирт")
     logger.info("🧘 Анализ эмоций включён")
     logger.info("📝 Напоминания активны")
-    logger.info("🛡️ Модерация: автоматическая + ручная (/warn, /unban)")
+    logger.info("🛡️ Модерация: автоматическая + ручная (/warn, /unban) + заявки на вступление")
     logger.info(f"⚙️ Авто-модерация: {'включена' if AUTO_MODERATION_ENABLED else 'выключена'}")
     logger.info("🔘 Инлайн-клавиатуры активны")
     logger.info("🌤️ Погода подключена")
@@ -1116,7 +1198,6 @@ def main():
     logger.info("📌 Бот отвечает на упоминания в группах")
     logger.info("🔄 Запуск polling...")
 
-    # Запускаем polling в том же цикле
     try:
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
