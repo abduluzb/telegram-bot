@@ -1042,15 +1042,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Добавляем в локальную память
         add_chat_member(chat_id, user_id, user_name)
 
-        # Обработка команды "луна очисти таблицу <имя>" (только владелец)
+                # Обработка команды "луна очисти таблицу <имя>" (только владелец)
         if is_owner(user_id):
-            match = re.search(r'^луна\s+очисти\s+таблицу\s+(\w+)', text_lower)
+            match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
-                table_name = match.group(1)
-                if clear_table(table_name):
-                    await message.reply_text(f"✅ Таблица `{table_name}` очищена.", parse_mode='Markdown')
+                table_name = match.group(1).lower()
+                valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config"]
+                
+                if table_name in ["все", "all", "всех"]:
+                    # Очищаем все таблицы
+                    cleared = []
+                    for t in valid_tables:
+                        if clear_table(t):
+                            cleared.append(t)
+                    if cleared:
+                        await message.reply_text(f"✅ Очищены таблицы: {', '.join(cleared)}", parse_mode='Markdown')
+                    else:
+                        await message.reply_text("❌ Не удалось очистить ни одной таблицы.")
+                elif table_name in valid_tables:
+                    if clear_table(table_name):
+                        await message.reply_text(f"✅ Таблица `{table_name}` очищена.", parse_mode='Markdown')
+                    else:
+                        await message.reply_text(f"❌ Не удалось очистить таблицу `{table_name}`.", parse_mode='Markdown')
                 else:
-                    await message.reply_text(f"❌ Не удалось очистить таблицу `{table_name}`. Проверьте имя (доступны: user_stats, user_info, chat_memory, violations, reminders, notes, config).", parse_mode='Markdown')
+                    await message.reply_text(
+                        f"❌ Недопустимое имя таблицы. Доступны: {', '.join(valid_tables)} или 'все'.",
+                        parse_mode='Markdown'
+                    )
                 return
 
         # Вопросы о владельце
