@@ -1,4 +1,4 @@
-# database.py - полная версия с ограничением 100 записей на пользователя и очисткой таблиц
+# database.py - полная версия с поддержкой SQLite/MySQL и функциями для бота
 
 import os
 import logging
@@ -149,6 +149,7 @@ def set_global_mode(mode: str) -> None:
 
 # ----- Информация о пользователе (UserInfo) -----
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
+    """Возвращает словарь с данными пользователя, а не объект."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -175,7 +176,16 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             if any([username, first_name, last_name, language_code]):
                 user_info.updated_at = datetime.utcnow()
                 session.commit()
-        return user_info
+        # Возвращаем словарь с нужными данными
+        return {
+            "user_id": user_info.user_id,
+            "username": user_info.username,
+            "first_name": user_info.first_name,
+            "last_name": user_info.last_name,
+            "language_code": user_info.language_code,
+            "timezone": user_info.timezone,
+            "city": user_info.city,
+        }
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка получения/создания UserInfo: {e}")

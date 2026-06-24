@@ -1,4 +1,4 @@
-# bot.py - Luna AI с новыми промптами, городом через инлайн и временем пользователя
+# bot.py - Luna AI (финальная версия)
 
 import os
 import asyncio
@@ -9,7 +9,7 @@ import aiohttp
 import io
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
-import pytz  # для работы с часовыми поясами
+import pytz
 
 from dotenv import load_dotenv
 from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -848,7 +848,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== CALLBACK (упрощён – без города) ==============
+# ============== CALLBACK ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -891,7 +891,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    # Старые кнопки города удалены – теперь они через инлайн
     elif data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через меню.", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -977,7 +976,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
-# ============== ОСНОВНАЯ ЛОГИКА (с новыми промптами и временем пользователя) ==============
+# ============== ОСНОВНАЯ ЛОГИКА ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.effective_message
@@ -1001,7 +1000,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await apply_moderation(update, context):
             return
 
-        # Сохраняем информацию о пользователе
+        # Сохраняем информацию о пользователе (словарь)
         user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -1013,13 +1012,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # Сохраняем сообщение в историю чата (БД) с ограничением 100 записей на пользователя
+        # Сохраняем сообщение в историю чата (БД)
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
 
         # Добавляем в локальную память
         add_chat_member(chat_id, user_id, user_name)
 
-        # Обработка команды "луна очисти таблицу <имя>" (только владелец)
+        # --- Обработка вопроса о времени ---
+        if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
+            if user_info and user_info.get('timezone'):
+                try:
+                    tz = pytz.timezone(user_info['timezone'])
+                    now = datetime.now(tz)
+                    await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
+                except Exception as e:
+                    logger.error(f"Ошибка определения времени: {e}")
+                    await message.reply_text("⚠️ Не удалось определить ваше время. Убедитесь, что таймзона задана правильно (/settimezone).")
+            else:
+                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone (например: /settimezone UTC+3)")
+            return
+
+        # --- Очистка таблиц (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -1047,7 +1060,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-        # Вопросы о владельце
+        # --- Вопросы о владельце ---
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -1060,7 +1073,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # Вопросы о внешности владельца
+        # --- Внешность владельца ---
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -1080,7 +1093,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # Обработка "луна запомни ..."
+        # --- Заметки "луна запомни" ---
         if re.search(r'^луна\s+запомни\s+', text_lower):
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -1092,7 +1105,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # Решаем, нужно ли отвечать
+        # --- Определяем, нужно ли отвечать ---
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1127,13 +1140,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # Википедия
+        # --- Википедия ---
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # Лимит спама
+        # --- Лимит спама ---
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1142,7 +1155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # Подготовка к AI
+        # --- Подготовка к AI ---
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1159,17 +1172,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         context_text = build_context(chat_id, user_id, user_name)
 
-        # --- Добавление времени пользователя (если есть таймзона) ---
+        # --- Время пользователя (для AI) ---
         user_time_str = ""
-        if user_info and user_info.timezone:
+        if user_info and user_info.get('timezone'):
             try:
-                tz = pytz.timezone(user_info.timezone)
+                tz = pytz.timezone(user_info['timezone'])
                 now = datetime.now(tz)
-                user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info.timezone})"
+                user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info['timezone']})"
             except:
-                user_time_str = ""
+                pass
 
-        # ==================== НОВЫЕ ПРОМПТЫ ====================
+        # ===== ПРОМПТЫ =====
         mode_prompts = {
             "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.
@@ -1236,7 +1249,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
         system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
-        # ====================================================
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1330,7 +1342,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
 
-# ============== НОВОЕ МЕНЮ (с инлайн-кнопками для города) ==============
+# ============== МЕНЮ ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1346,7 +1358,6 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
         ],
         [
-            # Кнопка города теперь использует switch_inline_query_current_chat
             InlineKeyboardButton("🇺🇿 Ташкент", switch_inline_query_current_chat="/setcity Ташкент"),
             InlineKeyboardButton("🇷🇺 Москва", switch_inline_query_current_chat="/setcity Москва"),
         ],
