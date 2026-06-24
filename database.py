@@ -1,4 +1,4 @@
-# database.py - использует переменные Railway для MySQL
+# database.py - поддержка SQLite и MySQL (для Railway)
 
 import os
 import logging
@@ -9,28 +9,40 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# По умолчанию используем SQLite для локальной разработки,
-# но если есть переменная USE_SQLITE=False – переключаемся на MySQL
+# === Определяем, какую БД использовать ===
 USE_SQLITE = os.getenv("USE_SQLITE", "True").lower() == "true"
 
 if USE_SQLITE:
     DATABASE_URL = "sqlite:///luna_bot.db"
     logger.info("Используется SQLite (локальная БД)")
 else:
-    # Читаем переменные Railway
-    DB_HOST = os.getenv("MYSQLHOST")
-    DB_PORT = os.getenv("MYSQLPORT", "3306")
-    DB_USER = os.getenv("MYSQLUSER")
-    DB_PASSWORD = os.getenv("MYSQLPASSWORD")
-    DB_NAME = os.getenv("MYSQLDATABASE")
+    # Пробуем получить URL из переменной DATABASE_URL или MYSQL_URL
+    db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
+    if db_url:
+        DATABASE_URL = db_url
+        logger.info("Используется MySQL по URL из переменной")
+    else:
+        # Или собираем из отдельных переменных Railway
+        DB_HOST = os.getenv("MYSQLHOST")
+        DB_PORT = os.getenv("MYSQLPORT", "3306")
+        DB_USER = os.getenv("MYSQLUSER")
+        DB_PASSWORD = os.getenv("MYSQLPASSWORD")
+        DB_NAME = os.getenv("MYSQLDATABASE")
 
-    if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-        raise ValueError("❌ Не найдены переменные MYSQLHOST, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE")
+        # Проверяем, что все переменные заданы
+        if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
+            # Выводим отладочную информацию
+            logger.error(f"DB_HOST={DB_HOST}, DB_USER={DB_USER}, DB_PASSWORD={DB_PASSWORD}, DB_NAME={DB_NAME}")
+            raise ValueError(
+                "❌ Для MySQL не хватает переменных!\n"
+                "Добавьте в окружение: MYSQLHOST, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE\n"
+                "Или установите USE_SQLITE=True для использования SQLite."
+            )
+        
+        DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+        logger.info(f"Используется MySQL (хост: {DB_HOST})")
 
-    DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    logger.info(f"Используется MySQL (хост: {DB_HOST})")
-
-# Создаём движок
+# Создаём движок SQLAlchemy
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -76,7 +88,7 @@ class Reminder(Base):
     timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Создаём таблицы, если их нет
+# Создаём таблицы (если их нет)
 Base.metadata.create_all(bind=engine)
 
 # ============== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==============
@@ -135,6 +147,7 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
             timestamp=datetime.utcnow()
         )
         session.add(memory)
+        # Оставляем только 50 последних записей на чат
         count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
         if count > 50:
             old = session.query(ChatMemory).filter_by(chat_id=chat_id).order_by(ChatMemory.timestamp).limit(count - 50).all()
@@ -241,5 +254,4 @@ def delete_reminder(reminder_id):
 
 # ============== ИНИЦИАЛИЗАЦИЯ ==============
 def init_db():
-    # Таблицы уже созданы
     logger.info("✅ База данных инициализирована")
