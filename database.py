@@ -1,4 +1,4 @@
-# database.py - полная версия с UserInfo, Notes и защитой от NULL
+# database.py - полная версия с ограничением 100 записей на пользователя и очисткой таблиц
 
 import os
 import logging
@@ -149,7 +149,6 @@ def set_global_mode(mode: str) -> None:
 
 # ----- Информация о пользователе (UserInfo) -----
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
-    """Возвращает запись UserInfo, создавая её при необходимости."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -165,7 +164,6 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             session.commit()
             logger.info(f"Создана запись UserInfo для user_id={user_id}")
         else:
-            # Обновляем данные, если они изменились
             if username and user_info.username != username:
                 user_info.username = username
             if first_name and user_info.first_name != first_name:
@@ -186,7 +184,6 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
         session.close()
 
 def update_user_city_timezone(user_id, city=None, timezone=None):
-    """Обновляет город и таймзону пользователя."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -256,7 +253,7 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
-# ----- Память чата (ChatMemory) -----
+# ----- Память чата (ChatMemory) с ограничением 100 записей на пользователя -----
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
     try:
@@ -269,12 +266,16 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
             timestamp=datetime.utcnow()
         )
         session.add(memory)
-        count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
-        if count > 50:
-            old = session.query(ChatMemory).filter_by(chat_id=chat_id).order_by(ChatMemory.timestamp).limit(count - 50).all()
-            for item in old:
-                session.delete(item)
         session.commit()
+        # Проверяем количество записей для этого пользователя
+        count = session.query(ChatMemory).filter_by(user_id=user_id).count()
+        if count > 100:
+            # Удаляем самую старую запись для этого пользователя
+            oldest = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.asc()).first()
+            if oldest:
+                session.delete(oldest)
+                session.commit()
+                logger.info(f"Удалена старая запись из chat_memory для user_id={user_id}")
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка добавления в память чата: {e}")
@@ -296,7 +297,7 @@ def clear_chat_memory(chat_id):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка очистки памяти: {e}")
+        logger.error(f"Ошибка очистки памяти чата: {e}")
     finally:
         session.close()
 
@@ -405,6 +406,39 @@ def delete_note(note_id):
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка удаления заметки: {e}")
+        return False
+    finally:
+        session.close()
+
+# ----- Очистка таблиц (для владельца) -----
+def clear_table(table_name: str) -> bool:
+    """
+    Очищает указанную таблицу.
+    Возвращает True при успехе, иначе False.
+    """
+    session = get_session()
+    try:
+        # Список допустимых таблиц (для безопасности)
+        valid_tables = {
+            "user_stats": UserStats,
+            "user_info": UserInfo,
+            "chat_memory": ChatMemory,
+            "violations": Violation,
+            "reminders": Reminder,
+            "notes": Note,
+            "config": Config,
+        }
+        if table_name not in valid_tables:
+            logger.warning(f"Попытка очистить недопустимую таблицу: {table_name}")
+            return False
+        model = valid_tables[table_name]
+        deleted = session.query(model).delete()
+        session.commit()
+        logger.info(f"Очищена таблица {table_name}, удалено записей: {deleted}")
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка очистки таблицы {table_name}: {e}")
         return False
     finally:
         session.close()
