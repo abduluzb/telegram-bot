@@ -1,4 +1,4 @@
-# database.py - поддержка SQLite и MySQL (для Railway)
+# database.py - поддержка SQLite и MySQL, включая глобальный режим
 
 import os
 import logging
@@ -19,6 +19,9 @@ else:
     # Пробуем получить URL из переменной DATABASE_URL или MYSQL_URL
     db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
     if db_url:
+        # Убедимся, что используется pymysql
+        if db_url.startswith("mysql://") and "+pymysql" not in db_url:
+            db_url = db_url.replace("mysql://", "mysql+pymysql://", 1)
         DATABASE_URL = db_url
         logger.info("Используется MySQL по URL из переменной")
     else:
@@ -31,7 +34,6 @@ else:
 
         # Проверяем, что все переменные заданы
         if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-            # Выводим отладочную информацию
             logger.error(f"DB_HOST={DB_HOST}, DB_USER={DB_USER}, DB_PASSWORD={DB_PASSWORD}, DB_NAME={DB_NAME}")
             raise ValueError(
                 "❌ Для MySQL не хватает переменных!\n"
@@ -88,6 +90,14 @@ class Reminder(Base):
     timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Таблица для хранения глобальных настроек (ключ-значение)
+class Config(Base):
+    __tablename__ = "config"
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(255), unique=True, index=True)
+    value = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 # Создаём таблицы (если их нет)
 Base.metadata.create_all(bind=engine)
 
@@ -95,6 +105,45 @@ Base.metadata.create_all(bind=engine)
 
 def get_session():
     return SessionLocal()
+
+# ----- Глобальный режим (fast/smart/sarcastic/flirt) -----
+def get_global_mode(default="fast") -> str:
+    """Получить глобальный режим из БД."""
+    session = get_session()
+    try:
+        config = session.query(Config).filter_by(key="global_mode").first()
+        if config and config.value:
+            return config.value
+        return default
+    except Exception as e:
+        logger.error(f"Ошибка получения глобального режима: {e}")
+        return default
+    finally:
+        session.close()
+
+def set_global_mode(mode: str) -> None:
+    """Установить глобальный режим в БД."""
+    valid_modes = ["fast", "smart", "sarcastic", "flirt"]
+    if mode not in valid_modes:
+        raise ValueError(f"Некорректный режим: {mode}. Допустимые: {', '.join(valid_modes)}")
+    
+    session = get_session()
+    try:
+        config = session.query(Config).filter_by(key="global_mode").first()
+        if config:
+            config.value = mode
+            config.updated_at = datetime.utcnow()
+        else:
+            config = Config(key="global_mode", value=mode)
+            session.add(config)
+        session.commit()
+        logger.info(f"Глобальный режим установлен: {mode}")
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка установки глобального режима: {e}")
+        raise
+    finally:
+        session.close()
 
 # ----- Статистика пользователей -----
 def update_user_stats(user_id, text, username=None, first_name=None):
@@ -254,4 +303,5 @@ def delete_reminder(reminder_id):
 
 # ============== ИНИЦИАЛИЗАЦИЯ ==============
 def init_db():
+    # Таблицы уже созданы через Base.metadata.create_all
     logger.info("✅ База данных инициализирована")
