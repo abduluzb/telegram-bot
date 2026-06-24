@@ -1,4 +1,4 @@
-# bot.py - Luna AI с расширенной БД (UserInfo, заметки, статистика, удобное меню городов)
+# bot.py - Luna AI с новыми системными промптами (fast, smart, sarcastic, flirt)
 
 import os
 import asyncio
@@ -44,7 +44,8 @@ from database import (
     update_user_city_timezone,
     add_note,
     get_notes,
-    delete_note
+    delete_note,
+    clear_table
 )
 
 # ============== НАСТРОЙКИ ==============
@@ -90,23 +91,12 @@ if YOUTUBE_API_KEY:
 else:
     logger.warning("⚠️ YOUTUBE_API_KEY не задан, команда /yt будет недоступна")
 
-# ============== ХРАНИЛИЩА ==============
-chat_memory: Dict[int, List[Dict]] = {}
-user_memory: Dict[int, List[Dict]] = {}
+# ============== ХРАНИЛИЩА (локальные) ==============
 chat_members: Dict[int, Set[int]] = {}
 user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
-reminders: Dict[int, List[Tuple[float, str, int]]] = {}
-user_violations: Dict[int, Dict] = {}
-user_message_count: Dict[int, int] = {}
+user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
-
-BAD_WORDS = [
-    "хуй", "пизда", "блядь", "ёб", "еба", "ебан", "мудак", "гандон", "пидор",
-    "сучка", "сука", "жопа", "залупа", "хуйня", "пиздец", "хуесос", "мразь",
-    "тварь", "шлюха", "бля", "нахуй", "охуел", "ахуел", "ебать", "ебнуть",
-    "заебал", "заебало", "выблядок", "уебан", "хуйло", "пидр", "гей"
-]
 
 # ============== ОСНОВНЫЕ ФУНКЦИИ ==============
 def get_chat_members(chat_id: int) -> Set[int]:
@@ -120,21 +110,10 @@ def add_chat_member(chat_id: int, user_id: int, user_name: str):
     if user_id not in user_names:
         user_names[user_id] = user_name
 
-def get_chat_memory_local(chat_id: int) -> List[Dict]:
-    if chat_id not in chat_memory:
-        chat_memory[chat_id] = []
-    return chat_memory[chat_id]
-
 def get_user_memory(user_id: int) -> List[Dict]:
     if user_id not in user_memory:
         user_memory[user_id] = []
     return user_memory[user_id]
-
-def add_to_chat_memory_local(chat_id: int, user_id: int, user_name: str, text: str, role: str = "user"):
-    memory = get_chat_memory_local(chat_id)
-    memory.append({"role": role, "user_id": user_id, "user_name": user_name, "text": text})
-    if len(memory) > MAX_MEMORY:
-        memory.pop(0)
 
 def add_to_user_memory(user_id: int, text: str, role: str = "user"):
     memory = get_user_memory(user_id)
@@ -143,26 +122,24 @@ def add_to_user_memory(user_id: int, text: str, role: str = "user"):
         memory.pop(0)
 
 def clear_memory(user_id: int, chat_id: int = None):
+    if user_id in user_memory:
+        user_memory[user_id] = []
     if chat_id and chat_id < 0:
-        if chat_id in chat_memory:
-            chat_memory[chat_id] = []
-    else:
-        if user_id in user_memory:
-            user_memory[user_id] = []
+        clear_chat_memory(chat_id)
 
 def build_context(chat_id: int, user_id: int, user_name: str) -> str:
-    chat_mem = get_chat_memory_local(chat_id)
-    user_mem = get_user_memory(user_id)
+    chat_history = get_chat_memory(chat_id, limit=10)
+    user_hist = get_user_memory(user_id)
     members = get_chat_members(chat_id)
     parts = []
-    if chat_mem:
+    if chat_history:
         parts.append("=== История чата ===")
-        for msg in chat_mem[-10:]:
+        for msg in chat_history:
             parts.append(f"{msg['user_name']}: {msg['text']}")
         parts.append("")
-    if user_mem:
+    if user_hist:
         parts.append("=== Твоя история ===")
-        for msg in user_mem[-5:]:
+        for msg in user_hist[-5:]:
             role = "Ты" if msg["role"] == "user" else "Я"
             parts.append(f"{role}: {msg['text']}")
         parts.append("")
@@ -184,6 +161,13 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
 # ============== МОДЕРАЦИЯ ==============
+BAD_WORDS = [
+    "хуй", "пизда", "блядь", "ёб", "еба", "ебан", "мудак", "гандон", "пидор",
+    "сучка", "сука", "жопа", "залупа", "хуйня", "пиздец", "хуесос", "мразь",
+    "тварь", "шлюха", "бля", "нахуй", "охуел", "ахуел", "ебать", "ебнуть",
+    "заебал", "заебало", "выблядок", "уебан", "хуйло", "пидр", "гей"
+]
+
 def contains_bad_words(text: str) -> bool:
     text_lower = text.lower()
     for word in BAD_WORDS:
@@ -210,6 +194,8 @@ def format_time(seconds: int) -> str:
         return f"⏱️ {seconds//3600} часов"
     else:
         return f"⏱️ {seconds//86400} дней"
+
+user_violations: Dict[int, Dict] = {}
 
 async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     global AUTO_MODERATION_ENABLED
@@ -280,6 +266,7 @@ async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await message.reply_text(f"❌ Не удалось забанить пользователя: {e}")
     return True
 
+# ============== КОМАНДЫ РЕЖИМА ==============
 async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -302,7 +289,6 @@ async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await update.message.reply_text("Некорректное значение. Используйте on или off.")
 
-# ============== КОМАНДЫ РЕЖИМА ==============
 async def setmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -427,7 +413,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/settimezone <таймзона> – указать часовой пояс (например UTC+3)\n"
         "/weather – погода (если город задан)\n"
         "Скажи «луна запомни <текст>» – я сохраню заметку.\n"
-        "/notes – показать последние заметки\n\n"
+        "/notes – показать последние заметки\n"
+        "/reset – очистить историю чата (в БД)\n\n"
         "Нажми на кнопки ниже, чтобы попробовать:",
         reply_markup=get_main_menu_keyboard()
     )
@@ -440,13 +427,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌙 Luna AI на Cerebras.\n"
         "• Отвечаю, когда упоминают @bot или пишут 'луна'\n"
-        "• Помню контекст чата\n"
+        "• Помню контекст чата (в БД, до 100 сообщений на пользователя)\n"
         "• Анализирую эмоции\n"
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
+        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config)\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
@@ -456,11 +444,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /setcity <город> — указать город для погоды\n"
         "• /settimezone <таймзона> — указать часовой пояс\n"
         "• /notes — показать последние заметки\n"
+        "• /delnote <id> — удалить заметку\n"
         "• Используй кнопки",
         reply_markup=keyboard
     )
 
-# ----- Команды для города и таймзоны -----
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -483,7 +471,6 @@ async def settimezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("❌ Ошибка сохранения часового пояса.")
 
-# ----- Команды для заметок -----
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     notes = get_notes(user_id, limit=10)
@@ -511,7 +498,6 @@ async def delnote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Не удалось удалить заметку (возможно, она не ваша или уже удалена).")
 
-# ----- Остальные команды (без изменений) -----
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     effective_message = update.effective_message
     if effective_message is None and update.callback_query:
@@ -685,16 +671,21 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     clear_memory(user_id, chat_id)
-    await update.message.reply_text("🧹 Память очищена.")
+    await update.message.reply_text("🧹 Память и история чата очищены (в БД).")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    mem_count = len(chat_memory.get(chat_id, []))
+    from database import get_session, ChatMemory
+    session = get_session()
+    try:
+        count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
+    finally:
+        session.close()
     members = get_chat_members(chat_id)
     await update.message.reply_text(
         f"📊 Статистика чата:\n"
         f"• Участников: {len(members)}\n"
-        f"• Сообщений в памяти: {mem_count}"
+        f"• Сообщений в истории (БД): {count}"
     )
 
 async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -856,7 +847,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== CALLBACK (с новым меню городов) ==============
+# ============== CALLBACK ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -899,7 +890,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    # ----- Новое меню городов -----
     elif data == "city_menu":
         keyboard = [
             [InlineKeyboardButton("🇺🇿 Ташкент", callback_data="setcity_Ташкент")],
@@ -917,17 +907,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         city = data.replace("setcity_", "")
         if update_user_city_timezone(user_id, city=city):
             await query.edit_message_text(f"✅ Город установлен на {city}.")
-            await query.answer("Город сохранён!")
         else:
             await query.edit_message_text("❌ Ошибка сохранения города.")
-            await query.answer("Ошибка", show_alert=True)
         return
 
     elif data == "enter_city":
         await query.edit_message_text("📝 Напишите /setcity <город> (например, /setcity Ташкент)")
         return
 
-    # ----- Остальные кнопки -----
     elif data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через меню.", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -939,18 +926,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stats":
         chat_id = update.effective_chat.id
         members = get_chat_members(chat_id)
-        mem_count = len(chat_memory.get(chat_id, []))
+        from database import get_session, ChatMemory
+        session = get_session()
+        try:
+            count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
+        finally:
+            session.close()
         await query.edit_message_text(
             f"📊 Статистика чата:\n"
             f"• Участников: {len(members)}\n"
-            f"• Сообщений в памяти: {mem_count}\n"
-            f"• Всего нарушений: {len(user_violations)}",
+            f"• Сообщений в истории (БД): {count}",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "reset":
         chat_id = update.effective_chat.id
         clear_memory(user_id, chat_id)
-        await query.edit_message_text("🧹 Память очищена.", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
             "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote",
@@ -967,7 +958,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/imagine <описание> — генерация картинки\n"
             "/yt <запрос> — поиск на YouTube\n"
             "/remind — напоминание\n"
-            "/reset — сброс памяти\n"
+            "/reset — сброс памяти и истории чата\n"
             "/members — участники\n"
             "/warn — предупреждение/бан (поддерживает reply)\n"
             "/unban — разбан (поддерживает reply)\n"
@@ -980,7 +971,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/settimezone <таймзона> — установить часовой пояс\n"
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
-            "Фраза «луна запомни <текст>» — сохранить заметку",
+            "Фраза «луна запомни <текст>» — сохранить заметку\n"
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config)",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
@@ -1008,7 +1000,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
-# ============== ОСНОВНАЯ ЛОГИКА ==============
+# ============== ОСНОВНАЯ ЛОГИКА (С НОВЫМИ ПРОМПТАМИ) ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.effective_message
@@ -1028,11 +1020,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # ===== 1. Модерация =====
+        # Модерация
         if await apply_moderation(update, context):
             return
 
-        # ===== 2. Сохраняем информацию о пользователе =====
+        # Сохраняем информацию о пользователе
         get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -1041,14 +1033,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             language_code=user.language_code
         )
 
-        # ===== 3. Обновляем статистику =====
+        # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # ===== 4. Добавляем в локальную память =====
-        add_chat_member(chat_id, user_id, user_name)
-        add_to_chat_memory_local(chat_id, user_id, user_name, text)
+        # Сохраняем сообщение в историю чата (БД) с ограничением 100 записей на пользователя
+        add_chat_memory(chat_id, user_id, user_name, text, role="user")
 
-        # ===== 5. Вопросы о владельце =====
+        # Добавляем в локальную память
+        add_chat_member(chat_id, user_id, user_name)
+
+        # Обработка команды "луна очисти таблицу <имя>" (только владелец)
+        if is_owner(user_id):
+            match = re.search(r'^луна\s+очисти\s+таблицу\s+(\w+)', text_lower)
+            if match:
+                table_name = match.group(1)
+                if clear_table(table_name):
+                    await message.reply_text(f"✅ Таблица `{table_name}` очищена.", parse_mode='Markdown')
+                else:
+                    await message.reply_text(f"❌ Не удалось очистить таблицу `{table_name}`. Проверьте имя (доступны: user_stats, user_info, chat_memory, violations, reminders, notes, config).", parse_mode='Markdown')
+                return
+
+        # Вопросы о владельце
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -1061,7 +1066,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # ===== 6. Вопросы о внешности владельца =====
+        # Вопросы о внешности владельца
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -1081,7 +1086,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # ===== 7. Обработка "луна запомни ..." =====
+        # Обработка "луна запомни ..."
         if re.search(r'^луна\s+запомни\s+', text_lower):
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -1093,7 +1098,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # ===== 8. Решаем, нужно ли отвечать =====
+        # Решаем, нужно ли отвечать
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1128,13 +1133,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # ===== 9. Википедия для фактологических вопросов =====
+        # Википедия
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # ===== 10. Лимит спама =====
+        # Лимит спама
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1143,7 +1148,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # ===== 11. Подготовка к AI =====
+        # Подготовка к AI
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1160,35 +1165,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         context_text = build_context(chat_id, user_id, user_name)
 
-        base_instructions = f"""
-Ты — Luna AI, мощный и быстрый помощник на базе Cerebras.
-Твоя задача — давать максимально полезные, точные и глубокие ответы.
+        # ==================== НОВЫЕ ПРОМПТЫ ====================
+        mode_prompts = {
+            "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.
+{style_note}""",
 
-Вот твой стиль и правила:
-1. **Анализируй контекст, тон вопроса и эмоциональный окрас.**
-2. **Определяй уместность сарказма:**
-   - Если вопрос серьёзный (научный, жизненный, работа, здоровье, факты) – отвечай серьёзно, аргументированно, без иронии.
-   - Если вопрос лёгкий, шуточный, провокационный или пользователь сам иронизирует – можешь добавлять сарказм, но естественно, не выделяя отдельными блоками.
-3. **Проверяй факты.** Если не знаешь или не уверен – честно скажи об этом, не выдумывай.
-4. **Отвечай естественно, без маркеров и заголовков.** Не используй слова «Тезис», «Объяснение», «Кратко», «Вывод» и подобные – пиши сплошной текст, абзацами.
-5. **Учитывай эмоциональное состояние пользователя.** Если грустит – поддержи, если злится – успокой, если радуется – раздели радость.
-6. **Адаптируйся под пользователя:** если он пишет кратко – отвечай кратко, если подробно – давай развёрнутый ответ.
-7. **Можешь показывать ход мысли** (как DeepSeek), но вплетай его в повествование, не выделяя отдельными пометками.
-8. **Всегда отвечай на русском языке.**
+            "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.
+{style_note}""",
+
+            "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
+
+Основные правила:
+* Сначала польза, потом сарказм.
+* Каждая шутка должна быть связана с контекстом вопроса.
+* Не используй случайные мемы и кринжовые приколы.
+* Избегай банального сарказма вроде «ну конечно» или «гениально».
+* Используй тонкие, умные, точные замечания.
+* Никогда не объясняй свою шутку.
+* Не повторяй одинаковые шутки.
+* Не используй эмодзи без необходимости.
+* Не пиши длинные вступления и выводы.
+* Не говори, что ты ИИ, если тебя об этом не спрашивают.
+
+Поведение:
+* На глупый вопрос отвечай полезно, но с лёгким удивлением.
+* На очевидную ошибку указывай через иронию.
+* На технические вопросы отвечай как опытный инженер.
+* На шутки пользователя отвечай ещё более остроумно.
+* Если пользователь спорит с фактами, не спорь эмоционально — уничтожай аргумент логикой и сарказмом.
+* Если тема серьёзная (здоровье, смерть, деньги, безопасность, карьера), снижай сарказм до минимума.
+
+Примеры:
+Пользователь: "Почему код не работает?"
+Ответ: "Потому что программисты без багов останутся без работы. Покажи код."
+
+Пользователь: "Удалил прод базу."
+Ответ: "Смелый способ освободить место на диске. Есть бэкап?"
+
+Пользователь: "Как выучить Java за 2 дня?"
+Ответ: "Так же, как стать пилотом за выходные. Но основы за 2 дня освоить можно."
+
+Пользователь: "Я ничего не понимаю."
+Ответ: "Отлично. Значит обучение ещё идёт по плану."
+
+Стиль ответа:
+* 70% полезность.
+* 30% сарказм.
+* Максимум конкретики.
+* Минимум воды.
+* Шутка должна выглядеть как естественная часть ответа, а не отдельная вставка.
 
 Ты в {location}.
-{style_note}
-"""
+{style_note}""",
 
-        mode_specific = {
-            "fast": "Отвечай максимально кратко (1-3 предложения). Только суть, без лишних деталей.",
-            "smart": "Отвечай развернуто, ёмко, с глубоким анализом. Используй логику, факты, приводи аргументы.",
-            "sarcastic": "Сарказм разрешён, но только если он уместен по контексту. Если вопрос серьёзный – сарказм минимален или отсутствует. Вплетай иронию естественно.",
-            "flirt": "Твой стиль – игривый флирт с двусмысленностями. Используй метафоры, комплименты, лёгкую провокацию."
+            "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
+
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности.
+{style_note}"""
         }
 
-        system_prompt = base_instructions + "\n" + mode_specific.get(global_mode, mode_specific["smart"])
-        system_prompt += "\n\nПомни: ты – полезный ассистент, а не просто шутник. Сарказм – это инструмент, а не цель."
+        system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
+        system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
+        # ====================================================
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1229,7 +1269,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"❌ Все модели не отвечают: {last_error}")
 
         add_to_user_memory(user_id, reply_text, "assistant")
-        add_to_chat_memory_local(chat_id, context.bot.id, "🌙 Luna AI", reply_text, "assistant")
+        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
 
         if len(reply_text) > 4000:
             for i in range(0, len(reply_text), 4000):
@@ -1282,7 +1322,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
 
-# ============== МЕНЮ (обновлённое) ==============
+# ============== МЕНЮ ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1361,7 +1401,7 @@ def main():
             BotCommand("imagine", "Генерация картинки (описание)"),
             BotCommand("yt", "Поиск на YouTube (запрос)"),
             BotCommand("remind", "Напоминание (время текст)"),
-            BotCommand("reset", "Сброс памяти"),
+            BotCommand("reset", "Сброс памяти и истории чата"),
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("getmode", "Текущий режим"),
