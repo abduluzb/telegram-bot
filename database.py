@@ -1,4 +1,4 @@
-# database.py - поддержка SQLite и MySQL, включая глобальный режим
+# database.py - с защитой от NULL
 
 import os
 import logging
@@ -16,35 +16,23 @@ if USE_SQLITE:
     DATABASE_URL = "sqlite:///luna_bot.db"
     logger.info("Используется SQLite (локальная БД)")
 else:
-    # Пробуем получить URL из переменной DATABASE_URL или MYSQL_URL
     db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
     if db_url:
-        # Убедимся, что используется pymysql
         if db_url.startswith("mysql://") and "+pymysql" not in db_url:
             db_url = db_url.replace("mysql://", "mysql+pymysql://", 1)
         DATABASE_URL = db_url
         logger.info("Используется MySQL по URL из переменной")
     else:
-        # Или собираем из отдельных переменных Railway
         DB_HOST = os.getenv("MYSQLHOST")
         DB_PORT = os.getenv("MYSQLPORT", "3306")
         DB_USER = os.getenv("MYSQLUSER")
         DB_PASSWORD = os.getenv("MYSQLPASSWORD")
         DB_NAME = os.getenv("MYSQLDATABASE")
-
-        # Проверяем, что все переменные заданы
         if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-            logger.error(f"DB_HOST={DB_HOST}, DB_USER={DB_USER}, DB_PASSWORD={DB_PASSWORD}, DB_NAME={DB_NAME}")
-            raise ValueError(
-                "❌ Для MySQL не хватает переменных!\n"
-                "Добавьте в окружение: MYSQLHOST, MYSQLUSER, MYSQLPASSWORD, MYSQLDATABASE\n"
-                "Или установите USE_SQLITE=True для использования SQLite."
-            )
-        
+            raise ValueError("❌ Для MySQL не хватает переменных!")
         DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         logger.info(f"Используется MySQL (хост: {DB_HOST})")
 
-# Создаём движок SQLAlchemy
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -90,7 +78,6 @@ class Reminder(Base):
     timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-# Таблица для хранения глобальных настроек (ключ-значение)
 class Config(Base):
     __tablename__ = "config"
     id = Column(Integer, primary_key=True, index=True)
@@ -98,17 +85,14 @@ class Config(Base):
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# Создаём таблицы (если их нет)
 Base.metadata.create_all(bind=engine)
 
-# ============== ФУНКЦИИ ДЛЯ РАБОТЫ С БД ==============
+# ============== ФУНКЦИИ ==============
 
 def get_session():
     return SessionLocal()
 
-# ----- Глобальный режим (fast/smart/sarcastic/flirt) -----
 def get_global_mode(default="fast") -> str:
-    """Получить глобальный режим из БД."""
     session = get_session()
     try:
         config = session.query(Config).filter_by(key="global_mode").first()
@@ -122,11 +106,9 @@ def get_global_mode(default="fast") -> str:
         session.close()
 
 def set_global_mode(mode: str) -> None:
-    """Установить глобальный режим в БД."""
     valid_modes = ["fast", "smart", "sarcastic", "flirt"]
     if mode not in valid_modes:
-        raise ValueError(f"Некорректный режим: {mode}. Допустимые: {', '.join(valid_modes)}")
-    
+        raise ValueError(f"Некорректный режим: {mode}")
     session = get_session()
     try:
         config = session.query(Config).filter_by(key="global_mode").first()
@@ -137,7 +119,6 @@ def set_global_mode(mode: str) -> None:
             config = Config(key="global_mode", value=mode)
             session.add(config)
         session.commit()
-        logger.info(f"Глобальный режим установлен: {mode}")
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка установки глобального режима: {e}")
@@ -145,19 +126,33 @@ def set_global_mode(mode: str) -> None:
     finally:
         session.close()
 
-# ----- Статистика пользователей -----
 def update_user_stats(user_id, text, username=None, first_name=None):
     session = get_session()
     try:
         user = session.query(UserStats).filter_by(user_id=user_id).first()
         if not user:
-            user = UserStats(user_id=user_id, username=username, first_name=first_name)
+            # Явно задаём начальные значения, чтобы не было NULL
+            user = UserStats(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                messages_count=0,
+                avg_len=0.0,
+                last_seen=datetime.utcnow()
+            )
             session.add(user)
         else:
             if username:
                 user.username = username
             if first_name:
                 user.first_name = first_name
+
+        # Защита от NULL (на случай, если в БД остались старые NULL-значения)
+        if user.messages_count is None:
+            user.messages_count = 0
+        if user.avg_len is None:
+            user.avg_len = 0.0
+
         old_total = user.messages_count * user.avg_len
         user.messages_count += 1
         user.avg_len = (old_total + len(text)) / user.messages_count
@@ -175,15 +170,14 @@ def get_user_stats(user_id):
         user = session.query(UserStats).filter_by(user_id=user_id).first()
         if user:
             return {
-                "messages_count": user.messages_count,
-                "avg_len": user.avg_len,
+                "messages_count": user.messages_count or 0,
+                "avg_len": user.avg_len or 0.0,
                 "last_seen": user.last_seen
             }
         return None
     finally:
         session.close()
 
-# ----- Память чата -----
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
     try:
@@ -196,7 +190,6 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
             timestamp=datetime.utcnow()
         )
         session.add(memory)
-        # Оставляем только 50 последних записей на чат
         count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
         if count > 50:
             old = session.query(ChatMemory).filter_by(chat_id=chat_id).order_by(ChatMemory.timestamp).limit(count - 50).all()
@@ -228,7 +221,6 @@ def clear_chat_memory(chat_id):
     finally:
         session.close()
 
-# ----- Нарушения -----
 def get_violations(user_id):
     session = get_session()
     try:
@@ -269,7 +261,6 @@ def clear_violation(user_id):
     finally:
         session.close()
 
-# ----- Напоминания -----
 def add_reminder(user_id, chat_id, text, timestamp):
     session = get_session()
     try:
@@ -301,7 +292,5 @@ def delete_reminder(reminder_id):
     finally:
         session.close()
 
-# ============== ИНИЦИАЛИЗАЦИЯ ==============
 def init_db():
-    # Таблицы уже созданы через Base.metadata.create_all
     logger.info("✅ База данных инициализирована")
