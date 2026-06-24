@@ -1,4 +1,4 @@
-# bot.py - Luna AI с новыми системными промптами (fast, smart, sarcastic, flirt)
+# bot.py - Luna AI с новыми промптами, городом через инлайн и временем пользователя
 
 import os
 import asyncio
@@ -9,6 +9,7 @@ import aiohttp
 import io
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
+import pytz  # для работы с часовыми поясами
 
 from dotenv import load_dotenv
 from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -434,7 +435,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
-        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config)\n"
+        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
@@ -847,7 +848,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== CALLBACK ==============
+# ============== CALLBACK (упрощён – без города) ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -890,31 +891,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    elif data == "city_menu":
-        keyboard = [
-            [InlineKeyboardButton("🇺🇿 Ташкент", callback_data="setcity_Ташкент")],
-            [InlineKeyboardButton("🇷🇺 Москва", callback_data="setcity_Москва")],
-            [InlineKeyboardButton("🇷🇺 Санкт-Петербург", callback_data="setcity_Санкт-Петербург")],
-            [InlineKeyboardButton("🇺🇸 Нью-Йорк", callback_data="setcity_Нью-Йорк")],
-            [InlineKeyboardButton("🇬🇧 Лондон", callback_data="setcity_Лондон")],
-            [InlineKeyboardButton("✏️ Ввести другой город", callback_data="enter_city")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
-        ]
-        await query.edit_message_text("🌍 Выберите город или введите свой:", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    elif data.startswith("setcity_"):
-        city = data.replace("setcity_", "")
-        if update_user_city_timezone(user_id, city=city):
-            await query.edit_message_text(f"✅ Город установлен на {city}.")
-        else:
-            await query.edit_message_text("❌ Ошибка сохранения города.")
-        return
-
-    elif data == "enter_city":
-        await query.edit_message_text("📝 Напишите /setcity <город> (например, /setcity Ташкент)")
-        return
-
+    # Старые кнопки города удалены – теперь они через инлайн
     elif data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через меню.", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -972,7 +949,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config)",
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
@@ -1000,7 +977,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
-# ============== ОСНОВНАЯ ЛОГИКА (С НОВЫМИ ПРОМПТАМИ) ==============
+# ============== ОСНОВНАЯ ЛОГИКА (с новыми промптами и временем пользователя) ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.effective_message
@@ -1025,7 +1002,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Сохраняем информацию о пользователе
-        get_or_create_user_info(
+        user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
             first_name=user.first_name,
@@ -1042,7 +1019,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Добавляем в локальную память
         add_chat_member(chat_id, user_id, user_name)
 
-                # Обработка команды "луна очисти таблицу <имя>" (только владелец)
+        # Обработка команды "луна очисти таблицу <имя>" (только владелец)
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -1050,7 +1027,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config"]
                 
                 if table_name in ["все", "all", "всех"]:
-                    # Очищаем все таблицы
                     cleared = []
                     for t in valid_tables:
                         if clear_table(t):
@@ -1183,15 +1159,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         context_text = build_context(chat_id, user_id, user_name)
 
+        # --- Добавление времени пользователя (если есть таймзона) ---
+        user_time_str = ""
+        if user_info and user_info.timezone:
+            try:
+                tz = pytz.timezone(user_info.timezone)
+                now = datetime.now(tz)
+                user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info.timezone})"
+            except:
+                user_time_str = ""
+
         # ==================== НОВЫЕ ПРОМПТЫ ====================
         mode_prompts = {
             "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.
-{style_note}""",
+{style_note}
+{user_time_str}""",
 
             "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.
-{style_note}""",
+{style_note}
+{user_time_str}""",
 
             "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
 
@@ -1236,12 +1224,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 * Шутка должна выглядеть как естественная часть ответа, а не отдельная вставка.
 
 Ты в {location}.
-{style_note}""",
+{style_note}
+{user_time_str}""",
 
             "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
 
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности.
-{style_note}"""
+{style_note}
+{user_time_str}"""
         }
 
         system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
@@ -1340,7 +1330,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
 
-# ============== МЕНЮ ==============
+# ============== НОВОЕ МЕНЮ (с инлайн-кнопками для города) ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1356,10 +1346,20 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
         ],
         [
-            InlineKeyboardButton("🌍 Город", callback_data="city_menu"),
-            InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
+            # Кнопка города теперь использует switch_inline_query_current_chat
+            InlineKeyboardButton("🇺🇿 Ташкент", switch_inline_query_current_chat="/setcity Ташкент"),
+            InlineKeyboardButton("🇷🇺 Москва", switch_inline_query_current_chat="/setcity Москва"),
         ],
         [
+            InlineKeyboardButton("🇷🇺 Санкт-Петербург", switch_inline_query_current_chat="/setcity Санкт-Петербург"),
+            InlineKeyboardButton("🇬🇧 Лондон", switch_inline_query_current_chat="/setcity Лондон"),
+        ],
+        [
+            InlineKeyboardButton("🇺🇸 Нью-Йорк", switch_inline_query_current_chat="/setcity Нью-Йорк"),
+            InlineKeyboardButton("✏️ Свой город", switch_inline_query_current_chat="/setcity "),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
             InlineKeyboardButton("❓ Помощь", callback_data="help"),
         ],
     ]
