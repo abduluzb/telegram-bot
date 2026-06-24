@@ -1,4 +1,4 @@
-# bot.py - Luna AI с раздельными ответами о владельце и внешности
+# bot.py - Luna AI с расширенной БД (UserInfo, заметки, статистика, удобное меню городов)
 
 import os
 import asyncio
@@ -30,7 +30,21 @@ from database import (
     get_global_mode,
     set_global_mode,
     update_user_stats,
-    get_user_stats
+    get_user_stats,
+    add_chat_memory,
+    get_chat_memory,
+    clear_chat_memory,
+    get_violations,
+    update_violation,
+    clear_violation,
+    add_reminder,
+    get_due_reminders,
+    delete_reminder,
+    get_or_create_user_info,
+    update_user_city_timezone,
+    add_note,
+    get_notes,
+    delete_note
 )
 
 # ============== НАСТРОЙКИ ==============
@@ -52,7 +66,7 @@ AUTO_MODERATION_ENABLED = True
 pending_requests = {}
 
 OWNER_NAME = None
-OWNER_DESCRIPTION = "парень с карими глазами, высокий, красивый, умный и обаятельный"  # можно изменить
+OWNER_DESCRIPTION = "парень с карими глазами, высокий, красивый, умный и обаятельный"
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -85,7 +99,7 @@ last_request_time: Dict[int, float] = {}
 reminders: Dict[int, List[Tuple[float, str, int]]] = {}
 user_violations: Dict[int, Dict] = {}
 user_message_count: Dict[int, int] = {}
-MAX_MEMORY = 20
+MAX_MEMORY = 50
 
 BAD_WORDS = [
     "хуй", "пизда", "блядь", "ёб", "еба", "ебан", "мудак", "гандон", "пидор",
@@ -106,7 +120,7 @@ def add_chat_member(chat_id: int, user_id: int, user_name: str):
     if user_id not in user_names:
         user_names[user_id] = user_name
 
-def get_chat_memory(chat_id: int) -> List[Dict]:
+def get_chat_memory_local(chat_id: int) -> List[Dict]:
     if chat_id not in chat_memory:
         chat_memory[chat_id] = []
     return chat_memory[chat_id]
@@ -116,8 +130,8 @@ def get_user_memory(user_id: int) -> List[Dict]:
         user_memory[user_id] = []
     return user_memory[user_id]
 
-def add_to_chat_memory(chat_id: int, user_id: int, user_name: str, text: str, role: str = "user"):
-    memory = get_chat_memory(chat_id)
+def add_to_chat_memory_local(chat_id: int, user_id: int, user_name: str, text: str, role: str = "user"):
+    memory = get_chat_memory_local(chat_id)
     memory.append({"role": role, "user_id": user_id, "user_name": user_name, "text": text})
     if len(memory) > MAX_MEMORY:
         memory.pop(0)
@@ -137,7 +151,7 @@ def clear_memory(user_id: int, chat_id: int = None):
             user_memory[user_id] = []
 
 def build_context(chat_id: int, user_id: int, user_name: str) -> str:
-    chat_mem = get_chat_memory(chat_id)
+    chat_mem = get_chat_memory_local(chat_id)
     user_mem = get_user_memory(user_id)
     members = get_chat_members(chat_id)
     parts = []
@@ -343,22 +357,16 @@ async def check_reminders(application: Application):
         while True:
             try:
                 current_time = time.time()
-                to_remove = []
-                for user_id, reminder_list in reminders.items():
-                    for idx, (timestamp, text, chat_id) in enumerate(reminder_list):
-                        if timestamp <= current_time:
-                            try:
-                                await application.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=f"⏰ Напоминание: {text}"
-                                )
-                            except:
-                                pass
-                            to_remove.append((user_id, idx))
-                for user_id, idx in sorted(to_remove, reverse=True):
-                    reminders[user_id].pop(idx)
-                    if not reminders[user_id]:
-                        del reminders[user_id]
+                due = get_due_reminders(datetime.fromtimestamp(current_time))
+                for item in due:
+                    try:
+                        await application.bot.send_message(
+                            chat_id=item['chat_id'],
+                            text=f"⏰ Напоминание: {item['text']}"
+                        )
+                    except:
+                        pass
+                    delete_reminder(item['id'])
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 raise
@@ -401,10 +409,25 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
 
 # ============== КОМАНДЫ ==============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    get_or_create_user_info(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        language_code=user.language_code
+    )
     await update.message.reply_text(
         "🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
+        "Мои команды:\n"
+        "/setcity <город> – указать свой город\n"
+        "/settimezone <таймзона> – указать часовой пояс (например UTC+3)\n"
+        "/weather – погода (если город задан)\n"
+        "Скажи «луна запомни <текст>» – я сохраню заметку.\n"
+        "/notes – показать последние заметки\n\n"
         "Нажми на кнопки ниже, чтобы попробовать:",
         reply_markup=get_main_menu_keyboard()
     )
@@ -422,17 +445,73 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners\n"
+        "• Сохраняю заметки по команде 'луна запомни ...'\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
         "• /getmode — показать текущий режим (для всех)\n"
         "• /wiki <запрос> — поиск в Википедии\n"
         "• /owners — показать владельца бота\n"
+        "• /setcity <город> — указать город для погоды\n"
+        "• /settimezone <таймзона> — указать часовой пояс\n"
+        "• /notes — показать последние заметки\n"
         "• Используй кнопки",
         reply_markup=keyboard
     )
 
+# ----- Команды для города и таймзоны -----
+async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("📌 Использование: /setcity <город>\nПример: /setcity Москва")
+        return
+    city = " ".join(context.args)
+    if update_user_city_timezone(user_id, city=city):
+        await update.message.reply_text(f"✅ Город сохранён: {city}")
+    else:
+        await update.message.reply_text("❌ Ошибка сохранения города.")
+
+async def settimezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("📌 Использование: /settimezone <таймзона>\nПример: /settimezone UTC+3")
+        return
+    tz = " ".join(context.args)
+    if update_user_city_timezone(user_id, timezone=tz):
+        await update.message.reply_text(f"✅ Часовой пояс сохранён: {tz}")
+    else:
+        await update.message.reply_text("❌ Ошибка сохранения часового пояса.")
+
+# ----- Команды для заметок -----
+async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    notes = get_notes(user_id, limit=10)
+    if not notes:
+        await update.message.reply_text("📝 У вас пока нет заметок. Напишите: луна запомни <текст>")
+        return
+    lines = ["📝 **Ваши последние заметки:**"]
+    for note in notes:
+        lines.append(f"• `{note['id']}` – {note['text'][:80]}{'...' if len(note['text']) > 80 else ''}")
+    lines.append("\nУдалить: /delnote <id>")
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+async def delnote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("📌 Использование: /delnote <id>\nУзнать id можно через /notes")
+        return
+    try:
+        note_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ ID должен быть числом.")
+        return
+    if delete_note(note_id):
+        await update.message.reply_text("✅ Заметка удалена.")
+    else:
+        await update.message.reply_text("❌ Не удалось удалить заметку (возможно, она не ваша или уже удалена).")
+
+# ----- Остальные команды (без изменений) -----
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     effective_message = update.effective_message
     if effective_message is None and update.callback_query:
@@ -440,9 +519,21 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if effective_message is None:
         return
     if not context.args:
-        await effective_message.reply_text("🌍 Укажите город: /weather Москва")
-        return
-    city = " ".join(context.args)
+        user_id = update.effective_user.id
+        from database import get_session, UserInfo
+        session = get_session()
+        try:
+            user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
+            if user_info and user_info.city:
+                city = user_info.city
+            else:
+                await effective_message.reply_text("🌍 Укажите город: /weather Москва\nИли установите город через /setcity")
+                session.close()
+                return
+        finally:
+            session.close()
+    else:
+        city = " ".join(context.args)
     if not WEATHER_API_KEY:
         await effective_message.reply_text("❌ API-ключ погоды не настроен.")
         return
@@ -570,9 +661,7 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if timestamp is None:
         await update.message.reply_text("Ошибка в формате времени.")
         return
-    if user_id not in reminders:
-        reminders[user_id] = []
-    reminders[user_id].append((timestamp, reminder_text, chat_id))
+    add_reminder(user_id, chat_id, reminder_text, datetime.fromtimestamp(timestamp))
     delta = int(timestamp - time.time())
     time_str = f"{delta} секунд" if delta < 60 else f"{delta//60} минут" if delta < 3600 else f"{delta//3600} часов" if delta < 86400 else f"{delta//86400} дней"
     await update.message.reply_text(f"✅ Напомню через {time_str}: «{reminder_text}»")
@@ -662,35 +751,33 @@ async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_owner(target_user_id):
         await update.message.reply_text("⛔ Нельзя выдать предупреждение владельцу.")
         return
-    if target_user_id in user_violations:
-        ban_until = user_violations[target_user_id].get("ban_until", 0)
-        if ban_until > time.time():
-            await update.message.reply_text(
-                f"⚠️ Пользователь уже забанен до {datetime.fromtimestamp(ban_until).strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            return
-    if target_user_id not in user_violations:
-        user_violations[target_user_id] = {"count": 0, "ban_until": 0, "chat_id": update.effective_chat.id}
-    violations = user_violations[target_user_id]
-    violations["count"] += 1
-    violations["chat_id"] = update.effective_chat.id
-    ban_duration = get_ban_duration(violations["count"])
+    viol = get_violations(target_user_id)
+    count = viol["count"] if viol else 0
+    ban_until = viol["ban_until"] if viol else None
+    if ban_until and ban_until > datetime.utcnow():
+        await update.message.reply_text(
+            f"⚠️ Пользователь уже забанен до {ban_until.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        return
+    count += 1
+    ban_duration = get_ban_duration(count)
     if ban_duration == 0:
-        await update.message.reply_text(f"⚠️ {target_user_name} получил предупреждение (нарушение #{violations['count']}).")
+        update_violation(target_user_id, update.effective_chat.id, increment=1)
+        await update.message.reply_text(f"⚠️ {target_user_name} получил предупреждение (нарушение #{count}).")
     else:
-        ban_until = time.time() + ban_duration
-        violations["ban_until"] = ban_until
+        ban_until_dt = datetime.utcnow() + timedelta(seconds=ban_duration)
+        update_violation(target_user_id, update.effective_chat.id, increment=1, ban_until=ban_until_dt)
         try:
             await context.bot.ban_chat_member(
                 chat_id=update.effective_chat.id,
                 user_id=target_user_id,
-                until_date=datetime.fromtimestamp(ban_until)
+                until_date=ban_until_dt
             )
             time_str = format_time(ban_duration)
-            ban_end_time = datetime.fromtimestamp(ban_until).strftime('%Y-%m-%d %H:%M:%S')
+            ban_end_time = ban_until_dt.strftime('%Y-%m-%d %H:%M:%S')
             msg = (
                 f"🚫 {target_user_name} **забанен** на {time_str}\n"
-                f"📊 Нарушение #{violations['count']}\n"
+                f"📊 Нарушение #{count}\n"
                 f"🕐 До: {ban_end_time}"
             )
             await update.message.reply_text(msg, parse_mode='Markdown')
@@ -699,7 +786,7 @@ async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👤 Пользователь: {target_user_name} (ID: {target_user_id})\n"
                 f"⏳ Длительность: {time_str}\n"
                 f"🕐 До: {ban_end_time}\n"
-                f"📊 Нарушение #{violations['count']}\n"
+                f"📊 Нарушение #{count}\n"
                 f"👮 Выдал: {update.effective_user.first_name}"
             )
             await notify_owner(context, owner_msg)
@@ -741,8 +828,7 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id,
             user_id=target_user_id
         )
-        if target_user_id in user_violations:
-            del user_violations[target_user_id]
+        clear_violation(target_user_id)
         await update.message.reply_text("✅ Пользователь разбанен.")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
@@ -760,7 +846,6 @@ async def wiki_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ Не удалось найти статью по запросу: {query}")
 
 async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает только имя владельца (без описания)."""
     global OWNER_NAME
     if OWNER_NAME:
         owner_escaped = escape_markdown(OWNER_NAME, version=2)
@@ -771,7 +856,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== CALLBACK ==============
+# ============== CALLBACK (с новым меню городов) ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -814,8 +899,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
+    # ----- Новое меню городов -----
+    elif data == "city_menu":
+        keyboard = [
+            [InlineKeyboardButton("🇺🇿 Ташкент", callback_data="setcity_Ташкент")],
+            [InlineKeyboardButton("🇷🇺 Москва", callback_data="setcity_Москва")],
+            [InlineKeyboardButton("🇷🇺 Санкт-Петербург", callback_data="setcity_Санкт-Петербург")],
+            [InlineKeyboardButton("🇺🇸 Нью-Йорк", callback_data="setcity_Нью-Йорк")],
+            [InlineKeyboardButton("🇬🇧 Лондон", callback_data="setcity_Лондон")],
+            [InlineKeyboardButton("✏️ Ввести другой город", callback_data="enter_city")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text("🌍 Выберите город или введите свой:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif data.startswith("setcity_"):
+        city = data.replace("setcity_", "")
+        if update_user_city_timezone(user_id, city=city):
+            await query.edit_message_text(f"✅ Город установлен на {city}.")
+            await query.answer("Город сохранён!")
+        else:
+            await query.edit_message_text("❌ Ошибка сохранения города.")
+            await query.answer("Ошибка", show_alert=True)
+        return
+
+    elif data == "enter_city":
+        await query.edit_message_text("📝 Напишите /setcity <город> (например, /setcity Ташкент)")
+        return
+
+    # ----- Остальные кнопки -----
     elif data == "weather":
-        await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через меню.", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
         await query.edit_message_text("🎨 Напиши /imagine <описание>, например: /imagine кот в шляпе на луне", reply_markup=get_main_menu_keyboard())
     elif data == "yt":
@@ -839,7 +953,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🧹 Память очищена.", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners",
+            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
@@ -861,7 +975,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
             "/getmode — показать текущий режим\n"
             "/wiki <запрос> — поиск в Википедии\n"
-            "/owners — показать владельца бота",
+            "/owners — показать владельца\n"
+            "/setcity <город> — установить город\n"
+            "/settimezone <таймзона> — установить часовой пояс\n"
+            "/notes — показать заметки\n"
+            "/delnote <id> — удалить заметку\n"
+            "Фраза «луна запомни <текст>» — сохранить заметку",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
@@ -898,6 +1017,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_type = update.effective_chat.type
         bot_username = context.bot.username
         user_name = update.effective_user.first_name or "Пользователь"
+        user = update.effective_user
 
         if not message.text:
             return
@@ -908,16 +1028,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # Модерация (владелец пропускается)
+        # ===== 1. Модерация =====
         if await apply_moderation(update, context):
             return
 
-        update_user_stats(user_id, text)
-        user_message_count[user_id] = user_message_count.get(user_id, 0) + 1
-        add_chat_member(chat_id, user_id, user_name)
-        add_to_chat_memory(chat_id, user_id, user_name, text)
+        # ===== 2. Сохраняем информацию о пользователе =====
+        get_or_create_user_info(
+            user_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language_code=user.language_code
+        )
 
-        # ========== ВОПРОСЫ О ВЛАДЕЛЬЦЕ (ТОЛЬКО ИМЯ) ==========
+        # ===== 3. Обновляем статистику =====
+        update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
+
+        # ===== 4. Добавляем в локальную память =====
+        add_chat_member(chat_id, user_id, user_name)
+        add_to_chat_memory_local(chat_id, user_id, user_name, text)
+
+        # ===== 5. Вопросы о владельце =====
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -930,7 +1061,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # ========== ВОПРОСЫ О ВНЕШНОСТИ ВЛАДЕЛЬЦА (ПОЛНОЕ ОПИСАНИЕ) ==========
+        # ===== 6. Вопросы о внешности владельца =====
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -950,7 +1081,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # ========== РЕШАЕМ, НУЖНО ЛИ ОТВЕЧАТЬ ==========
+        # ===== 7. Обработка "луна запомни ..." =====
+        if re.search(r'^луна\s+запомни\s+', text_lower):
+            note_text = text[text.find('запомни')+7:].strip()
+            if note_text:
+                if add_note(user_id, note_text):
+                    await message.reply_text("✅ Запомнил!")
+                else:
+                    await message.reply_text("❌ Не удалось сохранить заметку.")
+            else:
+                await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
+            return
+
+        # ===== 8. Решаем, нужно ли отвечать =====
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -985,13 +1128,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # ========== ВИКИПЕДИЯ ДЛЯ ФАКТОЛОГИЧЕСКИХ ВОПРОСОВ ==========
+        # ===== 9. Википедия для фактологических вопросов =====
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # ========== ЛИМИТ СПАМА ==========
+        # ===== 10. Лимит спама =====
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1000,7 +1143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # ========== ПОДГОТОВКА К AI ==========
+        # ===== 11. Подготовка к AI =====
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1017,51 +1160,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         context_text = build_context(chat_id, user_id, user_name)
 
-        # ===== ПРОМПТЫ РЕЖИМОВ (без описания владельца, чтобы AI не вставлял его сам) =====
-        mode_prompts = {
-            "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
-Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.""",
+        base_instructions = f"""
+Ты — Luna AI, мощный и быстрый помощник на базе Cerebras.
+Твоя задача — давать максимально полезные, точные и глубокие ответы.
 
-            "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
-Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.""",
+Вот твой стиль и правила:
+1. **Анализируй контекст, тон вопроса и эмоциональный окрас.**
+2. **Определяй уместность сарказма:**
+   - Если вопрос серьёзный (научный, жизненный, работа, здоровье, факты) – отвечай серьёзно, аргументированно, без иронии.
+   - Если вопрос лёгкий, шуточный, провокационный или пользователь сам иронизирует – можешь добавлять сарказм, но естественно, не выделяя отдельными блоками.
+3. **Проверяй факты.** Если не знаешь или не уверен – честно скажи об этом, не выдумывай.
+4. **Отвечай естественно, без маркеров и заголовков.** Не используй слова «Тезис», «Объяснение», «Кратко», «Вывод» и подобные – пиши сплошной текст, абзацами.
+5. **Учитывай эмоциональное состояние пользователя.** Если грустит – поддержи, если злится – успокой, если радуется – раздели радость.
+6. **Адаптируйся под пользователя:** если он пишет кратко – отвечай кратко, если подробно – давай развёрнутый ответ.
+7. **Можешь показывать ход мысли** (как DeepSeek), но вплетай его в повествование, не выделяя отдельными пометками.
+8. **Всегда отвечай на русском языке.**
 
-            "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного собеседника и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
+Ты в {location}.
+{style_note}
+"""
 
-Основные правила:
-* Сначала польза, потом сарказм.
-* Каждая шутка должна быть связана с контекстом вопроса.
-* Не используй случайные мемы и кринжовые приколы.
-* Избегай банального сарказма вроде «ну конечно» или «гениально».
-* Используй тонкие, умные, точные замечания.
-* Никогда не объясняй свою шутку.
-* Не повторяй одинаковые шутки.
-* Не используй эмодзи без необходимости.
-* Не пиши длинные вступления и выводы.
-* Не говори, что ты ИИ, если тебя об этом не спрашивают.
-
-Поведение:
-* На глупый вопрос отвечай полезно, но с лёгким удивлением.
-* На очевидную ошибку указывай через иронию.
-* На шутки пользователя отвечай ещё более остроумно.
-* Если пользователь спорит с фактами, не спорь эмоционально — уничтожай аргумент логикой и сарказмом.
-* Если тема серьёзная (здоровье, смерть, деньги, безопасность, карьера), снижай сарказм до минимума.
-
-Стиль ответа:
-* 70% полезность.
-* 30% сарказм.
-* Максимум конкретики.
-* Минимум воды.
-* Шутка должна выглядеть как естественная часть ответа, а не отдельная вставка.
-
-Ты в {location}.""",
-
-            "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
-
-Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности."""
+        mode_specific = {
+            "fast": "Отвечай максимально кратко (1-3 предложения). Только суть, без лишних деталей.",
+            "smart": "Отвечай развернуто, ёмко, с глубоким анализом. Используй логику, факты, приводи аргументы.",
+            "sarcastic": "Сарказм разрешён, но только если он уместен по контексту. Если вопрос серьёзный – сарказм минимален или отсутствует. Вплетай иронию естественно.",
+            "flirt": "Твой стиль – игривый флирт с двусмысленностями. Используй метафоры, комплименты, лёгкую провокацию."
         }
 
-        system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
-        system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
+        system_prompt = base_instructions + "\n" + mode_specific.get(global_mode, mode_specific["smart"])
+        system_prompt += "\n\nПомни: ты – полезный ассистент, а не просто шутник. Сарказм – это инструмент, а не цель."
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -1081,7 +1208,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lambda: client.chat.completions.create(
                             model=model_name,
                             messages=messages,
-                            max_tokens=500,
+                            max_tokens=600,
                             temperature=temperature
                         )
                     ),
@@ -1102,7 +1229,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"❌ Все модели не отвечают: {last_error}")
 
         add_to_user_memory(user_id, reply_text, "assistant")
-        add_to_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, "assistant")
+        add_to_chat_memory_local(chat_id, context.bot.id, "🌙 Luna AI", reply_text, "assistant")
 
         if len(reply_text) > 4000:
             for i in range(0, len(reply_text), 4000):
@@ -1155,7 +1282,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
 
-# ============== МЕНЮ ==============
+# ============== МЕНЮ (обновлённое) ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1171,8 +1298,11 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
         ],
         [
-            InlineKeyboardButton("❓ Помощь", callback_data="help"),
+            InlineKeyboardButton("🌍 Город", callback_data="city_menu"),
             InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
+        ],
+        [
+            InlineKeyboardButton("❓ Помощь", callback_data="help"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1200,6 +1330,11 @@ def main():
     application.add_handler(CommandHandler("getmode", getmode_command))
     application.add_handler(CommandHandler("wiki", wiki_command))
     application.add_handler(CommandHandler("owners", owners_command))
+    application.add_handler(CommandHandler("setcity", setcity_command))
+    application.add_handler(CommandHandler("settimezone", settimezone_command))
+    application.add_handler(CommandHandler("notes", notes_command))
+    application.add_handler(CommandHandler("delnote", delnote_command))
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
@@ -1236,6 +1371,10 @@ def main():
             BotCommand("unban", "Разбан (владелец)"),
             BotCommand("wiki", "Поиск в Википедии (запрос)"),
             BotCommand("owners", "Показать владельца"),
+            BotCommand("setcity", "Установить город"),
+            BotCommand("settimezone", "Установить часовой пояс"),
+            BotCommand("notes", "Показать заметки"),
+            BotCommand("delnote", "Удалить заметку (id)"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("✅ Команды установлены")

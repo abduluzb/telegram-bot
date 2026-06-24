@@ -1,4 +1,4 @@
-# database.py - с защитой от NULL
+# database.py - полная версия с UserInfo, Notes и защитой от NULL
 
 import os
 import logging
@@ -50,6 +50,19 @@ class UserStats(Base):
     last_seen = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class UserInfo(Base):
+    __tablename__ = "user_info"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, unique=True, index=True)
+    username = Column(String(255), nullable=True)
+    first_name = Column(String(255), nullable=True)
+    last_name = Column(String(255), nullable=True)
+    language_code = Column(String(10), nullable=True)
+    timezone = Column(String(50), nullable=True)
+    city = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class ChatMemory(Base):
     __tablename__ = "chat_memory"
     id = Column(Integer, primary_key=True, index=True)
@@ -78,6 +91,13 @@ class Reminder(Base):
     timestamp = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class Note(Base):
+    __tablename__ = "notes"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, index=True)
+    text = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class Config(Base):
     __tablename__ = "config"
     id = Column(Integer, primary_key=True, index=True)
@@ -92,6 +112,7 @@ Base.metadata.create_all(bind=engine)
 def get_session():
     return SessionLocal()
 
+# ----- Глобальный режим -----
 def get_global_mode(default="fast") -> str:
     session = get_session()
     try:
@@ -126,19 +147,77 @@ def set_global_mode(mode: str) -> None:
     finally:
         session.close()
 
+# ----- Информация о пользователе (UserInfo) -----
+def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
+    """Возвращает запись UserInfo, создавая её при необходимости."""
+    session = get_session()
+    try:
+        user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
+        if not user_info:
+            user_info = UserInfo(
+                user_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                language_code=language_code,
+            )
+            session.add(user_info)
+            session.commit()
+            logger.info(f"Создана запись UserInfo для user_id={user_id}")
+        else:
+            # Обновляем данные, если они изменились
+            if username and user_info.username != username:
+                user_info.username = username
+            if first_name and user_info.first_name != first_name:
+                user_info.first_name = first_name
+            if last_name and user_info.last_name != last_name:
+                user_info.last_name = last_name
+            if language_code and user_info.language_code != language_code:
+                user_info.language_code = language_code
+            if any([username, first_name, last_name, language_code]):
+                user_info.updated_at = datetime.utcnow()
+                session.commit()
+        return user_info
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка получения/создания UserInfo: {e}")
+        return None
+    finally:
+        session.close()
+
+def update_user_city_timezone(user_id, city=None, timezone=None):
+    """Обновляет город и таймзону пользователя."""
+    session = get_session()
+    try:
+        user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
+        if user_info:
+            if city:
+                user_info.city = city
+            if timezone:
+                user_info.timezone = timezone
+            user_info.updated_at = datetime.utcnow()
+            session.commit()
+            return True
+        return False
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка обновления city/timezone: {e}")
+        return False
+    finally:
+        session.close()
+
+# ----- Статистика (UserStats) -----
 def update_user_stats(user_id, text, username=None, first_name=None):
     session = get_session()
     try:
         user = session.query(UserStats).filter_by(user_id=user_id).first()
         if not user:
-            # Явно задаём начальные значения, чтобы не было NULL
             user = UserStats(
                 user_id=user_id,
                 username=username,
                 first_name=first_name,
                 messages_count=0,
-                avg_len=0.0,
-                last_seen=datetime.utcnow()
+                avg_len=0.0
             )
             session.add(user)
         else:
@@ -147,7 +226,6 @@ def update_user_stats(user_id, text, username=None, first_name=None):
             if first_name:
                 user.first_name = first_name
 
-        # Защита от NULL (на случай, если в БД остались старые NULL-значения)
         if user.messages_count is None:
             user.messages_count = 0
         if user.avg_len is None:
@@ -178,6 +256,7 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
+# ----- Память чата (ChatMemory) -----
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
     try:
@@ -221,6 +300,7 @@ def clear_chat_memory(chat_id):
     finally:
         session.close()
 
+# ----- Нарушения -----
 def get_violations(user_id):
     session = get_session()
     try:
@@ -261,6 +341,7 @@ def clear_violation(user_id):
     finally:
         session.close()
 
+# ----- Напоминания -----
 def add_reminder(user_id, chat_id, text, timestamp):
     session = get_session()
     try:
@@ -292,5 +373,42 @@ def delete_reminder(reminder_id):
     finally:
         session.close()
 
+# ----- Заметки (Notes) -----
+def add_note(user_id, text):
+    session = get_session()
+    try:
+        note = Note(user_id=user_id, text=text)
+        session.add(note)
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка добавления заметки: {e}")
+        return False
+    finally:
+        session.close()
+
+def get_notes(user_id, limit=10):
+    session = get_session()
+    try:
+        notes = session.query(Note).filter_by(user_id=user_id).order_by(Note.created_at.desc()).limit(limit).all()
+        return [{"id": n.id, "text": n.text, "created_at": n.created_at} for n in notes]
+    finally:
+        session.close()
+
+def delete_note(note_id):
+    session = get_session()
+    try:
+        session.query(Note).filter_by(id=note_id).delete()
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка удаления заметки: {e}")
+        return False
+    finally:
+        session.close()
+
+# ----- Инициализация -----
 def init_db():
     logger.info("✅ База данных инициализирована")
