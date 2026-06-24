@@ -5,3 +5,4 @@ aiohttp
 python-dotenv
 SQLAlchemy>=2.0.0
 pymysql
+pytz
