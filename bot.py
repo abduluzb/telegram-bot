@@ -1,4 +1,4 @@
-# bot.py - Luna AI (финальная версия)
+# bot.py - финальная версия с поддержкой UTC+5 и других форматов времени
 
 import os
 import asyncio
@@ -10,6 +10,12 @@ import io
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 import pytz
+
+# Для Python 3.9+ используем zoneinfo, если доступен
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 from dotenv import load_dotenv
 from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -98,6 +104,50 @@ user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
 user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
+
+# ============== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВРЕМЕНИ ==============
+def get_user_timezone(timezone_str: str):
+    """
+    Пытается создать объект timezone из строки.
+    Поддерживает форматы: 'UTC+5', 'UTC-3', 'GMT+2', 'Asia/Tashkent', 'Europe/Moscow' и т.д.
+    Возвращает объект timezone или None в случае ошибки.
+    """
+    if not timezone_str:
+        return None
+
+    # Убираем пробелы
+    tz_str = timezone_str.strip()
+
+    # 1. Попытка распарсить смещение вида "UTC+5", "UTC-3", "GMT+2"
+    match = re.match(r'(?i)(utc|gmt)\s*([+-]?\d{1,2}(?::\d{2})?)$', tz_str)
+    if match:
+        offset_str = match.group(2)
+        try:
+            if ':' in offset_str:
+                hours, minutes = map(int, offset_str.split(':'))
+            else:
+                hours = int(offset_str)
+                minutes = 0
+            delta = timedelta(hours=hours, minutes=minutes)
+            return datetime.timezone(delta)
+        except:
+            pass
+
+    # 2. Попытка использовать zoneinfo (Python 3.9+)
+    if ZoneInfo:
+        try:
+            return ZoneInfo(tz_str)
+        except:
+            pass
+
+    # 3. Попытка использовать pytz
+    try:
+        return pytz.timezone(tz_str)
+    except:
+        pass
+
+    # 4. Если всё не удалось – возвращаем None
+    return None
 
 # ============== ОСНОВНЫЕ ФУНКЦИИ ==============
 def get_chat_members(chat_id: int) -> Set[int]:
@@ -411,7 +461,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
-        "/settimezone <таймзона> – указать часовой пояс (например UTC+3)\n"
+        "/settimezone <таймзона> – указать часовой пояс (например UTC+5 или Asia/Tashkent)\n"
         "/weather – погода (если город задан)\n"
         "Скажи «луна запомни <текст>» – я сохраню заметку.\n"
         "/notes – показать последние заметки\n"
@@ -464,13 +514,18 @@ async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def settimezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text("📌 Использование: /settimezone <таймзона>\nПример: /settimezone UTC+3")
+        await update.message.reply_text("📌 Использование: /settimezone <таймзона>\nПример: /settimezone UTC+5 или /settimezone Asia/Tashkent")
         return
     tz = " ".join(context.args)
-    if update_user_city_timezone(user_id, timezone=tz):
-        await update.message.reply_text(f"✅ Часовой пояс сохранён: {tz}")
+    # Проверяем, что таймзона корректна
+    test_tz = get_user_timezone(tz)
+    if test_tz:
+        if update_user_city_timezone(user_id, timezone=tz):
+            await update.message.reply_text(f"✅ Часовой пояс сохранён: {tz}")
+        else:
+            await update.message.reply_text("❌ Ошибка сохранения часового пояса.")
     else:
-        await update.message.reply_text("❌ Ошибка сохранения часового пояса.")
+        await update.message.reply_text(f"❌ Таймзона '{tz}' не распознана. Используйте формат UTC+5, UTC-3, Asia/Tashkent, Europe/Moscow и т.д.")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1018,18 +1073,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Добавляем в локальную память
         add_chat_member(chat_id, user_id, user_name)
 
-        # --- Обработка вопроса о времени ---
+        # --- Обработка вопроса о времени (с исправленной проверкой) ---
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
-                try:
-                    tz = pytz.timezone(user_info['timezone'])
-                    now = datetime.now(tz)
-                    await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
-                except Exception as e:
-                    logger.error(f"Ошибка определения времени: {e}")
-                    await message.reply_text("⚠️ Не удалось определить ваше время. Убедитесь, что таймзона задана правильно (/settimezone).")
+                # Пытаемся получить timezone
+                tz = get_user_timezone(user_info['timezone'])
+                if tz:
+                    try:
+                        now = datetime.now(tz)
+                        await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
+                    except Exception as e:
+                        logger.error(f"Ошибка при вычислении времени: {e}")
+                        await message.reply_text(f"⚠️ Не удалось определить время для таймзоны '{user_info['timezone']}'. Проверьте правильность формата (например, UTC+5 или Asia/Tashkent).")
+                else:
+                    await message.reply_text(f"⚠️ Таймзона '{user_info['timezone']}' не распознана. Используйте формат UTC+5, Asia/Tashkent или Europe/Moscow.")
             else:
-                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone (например: /settimezone UTC+3)")
+                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone (например: /settimezone UTC+5 или /settimezone Asia/Tashkent)")
             return
 
         # --- Очистка таблиц (владелец) ---
@@ -1175,12 +1234,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # --- Время пользователя (для AI) ---
         user_time_str = ""
         if user_info and user_info.get('timezone'):
-            try:
-                tz = pytz.timezone(user_info['timezone'])
-                now = datetime.now(tz)
-                user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info['timezone']})"
-            except:
-                pass
+            tz = get_user_timezone(user_info['timezone'])
+            if tz:
+                try:
+                    now = datetime.now(tz)
+                    user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info['timezone']})"
+                except:
+                    pass
 
         # ===== ПРОМПТЫ =====
         mode_prompts = {
