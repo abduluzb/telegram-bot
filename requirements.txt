@@ -3,3 +3,5 @@ cerebras-cloud-sdk
 google-api-python-client
 aiohttp
 python-dotenv
+SQLAlchemy>=2.0.0
+pymysql
