@@ -1,4 +1,4 @@
-# bot.py - финальная версия с кнопками меню и оценками
+# bot.py - финальная версия с интеллектуальными улучшениями
 
 import os
 import asyncio
@@ -892,7 +892,6 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============== ОБРАБОТЧИКИ КНОПОК ==============
 
-# Основной обработчик для меню, approve/decline, режимов и т.д.
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1020,7 +1019,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
-# Обработчик для оценок (👍/👎)
 async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1030,7 +1028,6 @@ async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("rate_"):
         rating = 1 if "like" in data else -1
         try:
-            # Сохраняем оценку без деталей (для простоты)
             save_response_rating(user_id, "оценка", "оценка", rating)
             emoji = "👍" if rating == 1 else "👎"
             await query.edit_message_text(f"Спасибо за оценку {emoji}!")
@@ -1039,9 +1036,354 @@ async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ Не удалось сохранить оценку.")
 
 # ============== ОСНОВНАЯ ЛОГИКА ==============
-# (функция handle_message остаётся без изменений – она уже была в предыдущем сообщении)
-# Я приведу её снова, но чтобы не дублировать огромный код, я дам её в полном файле.
-# В этом сообщении я показываю только изменения, но полный файл я приложу отдельно.
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        message = update.effective_message
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        chat_type = update.effective_chat.type
+        bot_username = context.bot.username
+        user_name = update.effective_user.first_name or "Пользователь"
+        user = update.effective_user
+
+        if not message.text:
+            return
+        if user_id == context.bot.id:
+            return
+
+        text = message.text.strip()
+        text_lower = text.lower()
+        logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
+
+        # Модерация
+        if await apply_moderation(update, context):
+            return
+
+        # Сохраняем информацию о пользователе
+        user_info = get_or_create_user_info(
+            user_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language_code=user.language_code
+        )
+
+        # Обновляем статистику
+        update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
+
+        # Обновляем интересы
+        update_user_interests(user_id, text)
+
+        # Сохраняем в историю чата
+        add_chat_memory(chat_id, user_id, user_name, text, role="user")
+        add_chat_member(chat_id, user_id, user_name)
+
+        # --- Обработка вопроса о времени ---
+        if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
+            if user_info and user_info.get('timezone'):
+                tz = get_user_timezone(user_info['timezone'])
+                if tz:
+                    try:
+                        now = datetime.now(tz)
+                        await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
+                    except Exception as e:
+                        logger.error(f"Ошибка времени: {e}")
+                        await message.reply_text(f"⚠️ Не удалось определить время для '{user_info['timezone']}'.")
+                else:
+                    await message.reply_text(f"⚠️ Таймзона '{user_info['timezone']}' не распознана.")
+            else:
+                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
+            return
+
+        # --- Очистка таблиц (владелец) ---
+        if is_owner(user_id):
+            match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
+            if match:
+                table_name = match.group(1).lower()
+                valid_tables = [
+                    "user_stats", "user_info", "chat_memory", "violations",
+                    "reminders", "notes", "config", "user_interests", "response_ratings"
+                ]
+                if table_name in ["все", "all", "всех"]:
+                    cleared = []
+                    for t in valid_tables:
+                        if clear_table(t):
+                            cleared.append(t)
+                    if cleared:
+                        await message.reply_text(f"✅ Очищены таблицы: {', '.join(cleared)}", parse_mode='Markdown')
+                    else:
+                        await message.reply_text("❌ Не удалось очистить ни одной таблицы.")
+                elif table_name in valid_tables:
+                    if clear_table(table_name):
+                        await message.reply_text(f"✅ Таблица `{table_name}` очищена.", parse_mode='Markdown')
+                    else:
+                        await message.reply_text(f"❌ Не удалось очистить таблицу `{table_name}`.", parse_mode='Markdown')
+                else:
+                    await message.reply_text(
+                        f"❌ Недопустимое имя. Доступны: {', '.join(valid_tables)} или 'все'.",
+                        parse_mode='Markdown'
+                    )
+                return
+
+        # --- Вопросы о владельце ---
+        if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
+            global OWNER_NAME
+            if OWNER_NAME:
+                owner_escaped = escape_markdown(OWNER_NAME, version=2)
+                await message.reply_text(
+                    f"🌙 Мой создатель:\n👑 {owner_escaped}",
+                    parse_mode='MarkdownV2'
+                )
+            else:
+                await message.reply_text("Владелец не задан.")
+            return
+
+        # --- Внешность владельца ---
+        if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
+            global OWNER_DESCRIPTION
+            if OWNER_NAME and OWNER_DESCRIPTION:
+                owner_escaped = escape_markdown(OWNER_NAME, version=2)
+                desc_escaped = escape_markdown(OWNER_DESCRIPTION, version=2)
+                await message.reply_text(
+                    f"🌙 Мой создатель {owner_escaped} – {desc_escaped}",
+                    parse_mode='MarkdownV2'
+                )
+            elif OWNER_NAME:
+                owner_escaped = escape_markdown(OWNER_NAME, version=2)
+                await message.reply_text(
+                    f"🌙 Мой создатель – {owner_escaped}, но описание не задано.",
+                    parse_mode='MarkdownV2'
+                )
+            else:
+                await message.reply_text("Владелец не задан.")
+            return
+
+        # --- Заметки "луна запомни" ---
+        if re.search(r'^луна\s+запомни\s+', text_lower):
+            note_text = text[text.find('запомни')+7:].strip()
+            if note_text:
+                if add_note(user_id, note_text):
+                    await message.reply_text("✅ Запомнил!")
+                else:
+                    await message.reply_text("❌ Не удалось сохранить заметку.")
+            else:
+                await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
+            return
+
+        # --- Определяем, нужно ли отвечать ---
+        should_reply = False
+        if chat_type == Chat.PRIVATE:
+            should_reply = True
+            add_to_user_memory(user_id, text)
+        elif chat_type in [Chat.GROUP, Chat.SUPERGROUP]:
+            if message.entities:
+                for entity in message.entities:
+                    if entity.type == "mention":
+                        mention = text[entity.offset:entity.offset+entity.length]
+                        if mention.lower() == f"@{bot_username.lower()}":
+                            should_reply = True
+                            text = text.replace(mention, "").strip()
+                            break
+                    elif entity.type == "text_mention":
+                        if entity.user.id == context.bot.id:
+                            should_reply = True
+                            break
+            if not should_reply and re.search(r'\bлуна\b', text, re.IGNORECASE):
+                should_reply = True
+                text = re.sub(r'\bлуна\b', '', text, flags=re.IGNORECASE).strip()
+            if not should_reply and text.lower().startswith(f"@{bot_username.lower()}"):
+                should_reply = True
+                text = text.replace(f"@{bot_username}", "").strip()
+            if not should_reply and message.reply_to_message:
+                if message.reply_to_message.from_user.id == context.bot.id:
+                    should_reply = True
+            if should_reply:
+                add_to_user_memory(user_id, text)
+            else:
+                return
+
+        if not text:
+            text = "Продолжай."
+
+        # --- Википедия ---
+        if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
+            wiki_info = await get_wikipedia_summary(text)
+            if wiki_info:
+                text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
+
+        # --- Лимит спама ---
+        current_time = time.time()
+        if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
+            await message.reply_text("Пожалуйста, не спамь, дай подумать.")
+            return
+        last_request_time[user_id] = current_time
+
+        await message.chat.send_action(action="typing")
+
+        # --- Подготовка к AI ---
+        global_mode = get_global_mode()
+        user_stats = get_user_stats(user_id)
+        if user_stats:
+            avg_len = user_stats["avg_len"]
+            if avg_len > 100:
+                style_note = "Пользователь предпочитает развёрнутые ответы. Отвечай подробно."
+            elif avg_len < 30:
+                style_note = "Пользователь предпочитает краткие ответы. Отвечай максимально сжато."
+            else:
+                style_note = "Отвечай сбалансированно."
+        else:
+            style_note = ""
+
+        interests = get_user_interests(user_id, limit=5)
+        interests_str = f"Интересы пользователя: {', '.join(interests)}" if interests else ""
+
+        location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
+        context_text = build_context(chat_id, user_id, user_name)
+
+        user_time_str = ""
+        if user_info and user_info.get('timezone'):
+            tz = get_user_timezone(user_info['timezone'])
+            if tz:
+                try:
+                    now = datetime.now(tz)
+                    user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info['timezone']})"
+                except:
+                    pass
+
+        # ===== ПРОМПТЫ =====
+        mode_prompts = {
+            "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.
+{style_note}
+{interests_str}
+{user_time_str}""",
+
+            "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.
+{style_note}
+{interests_str}
+{user_time_str}""",
+
+            "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
+
+Основные правила:
+* Сначала польза, потом сарказм.
+* Каждая шутка должна быть связана с контекстом вопроса.
+* Не используй случайные мемы и кринжовые приколы.
+* Избегай банального сарказма вроде «ну конечно» или «гениально».
+* Используй тонкие, умные, точные замечания.
+* Никогда не объясняй свою шутку.
+* Не повторяй одинаковые шутки.
+* Не используй эмодзи без необходимости.
+* Не пиши длинные вступления и выводы.
+* Не говори, что ты ИИ, если тебя об этом не спрашивают.
+
+Поведение:
+* На глупый вопрос отвечай полезно, но с лёгким удивлением.
+* На очевидную ошибку указывай через иронию.
+* На технические вопросы отвечай как опытный инженер.
+* На шутки пользователя отвечай ещё более остроумно.
+* Если пользователь спорит с фактами, не спорь эмоционально — уничтожай аргумент логикой и сарказмом.
+* Если тема серьёзная (здоровье, смерть, деньги, безопасность, карьера), снижай сарказм до минимума.
+
+Примеры:
+Пользователь: "Почему код не работает?"
+Ответ: "Потому что программисты без багов останутся без работы. Покажи код."
+
+Пользователь: "Удалил прод базу."
+Ответ: "Смелый способ освободить место на диске. Есть бэкап?"
+
+Пользователь: "Как выучить Java за 2 дня?"
+Ответ: "Так же, как стать пилотом за выходные. Но основы за 2 дня освоить можно."
+
+Пользователь: "Я ничего не понимаю."
+Ответ: "Отлично. Значит обучение ещё идёт по плану."
+
+Стиль ответа:
+* 70% полезность.
+* 30% сарказм.
+* Максимум конкретики.
+* Минимум воды.
+* Шутка должна выглядеть как естественная часть ответа, а не отдельная вставка.
+
+Ты в {location}.
+{style_note}
+{interests_str}
+{user_time_str}""",
+
+            "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
+
+Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности.
+{style_note}
+{interests_str}
+{user_time_str}"""
+        }
+
+        system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
+        system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{context_text}\n\nВопрос от {user_name}: {text}"}
+        ]
+
+        thinking_msg = await message.reply_text("⚡ Думаю...")
+        reply_text = None
+        last_error = None
+        temperature = 1.0 if global_mode == "flirt" else 0.8
+
+        for model_name in MODELS:
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            max_tokens=600,
+                            temperature=temperature
+                        )
+                    ),
+                    timeout=15.0
+                )
+                if response.choices and response.choices[0].message.content:
+                    reply_text = response.choices[0].message.content.strip()
+                    if reply_text:
+                        logger.info(f"✅ Ответ от {model_name}")
+                        break
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"❌ Ошибка {model_name}: {e}")
+                await asyncio.sleep(1)
+
+        if not reply_text:
+            reply_text = "Не удалось получить ответ. Попробуй ещё раз."
+            logger.error(f"❌ Все модели не отвечают: {last_error}")
+
+        add_to_user_memory(user_id, reply_text, "assistant")
+        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👍 Понравилось", callback_data=f"rate_like_{user_id}"),
+                InlineKeyboardButton("👎 Не понравилось", callback_data=f"rate_dislike_{user_id}"),
+            ]
+        ])
+
+        if len(reply_text) > 4000:
+            for i in range(0, len(reply_text), 4000):
+                await thinking_msg.edit_text(reply_text[i:i+4000])
+                if i + 4000 < len(reply_text):
+                    thinking_msg = await message.reply_text("📄 Продолжение...")
+        else:
+            await thinking_msg.edit_text(reply_text, reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        try:
+            await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз.")
+        except:
+            pass
 
 # ============== ЗАЯВКИ НА ВСТУПЛЕНИЕ ==============
 async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1141,11 +1483,9 @@ def main():
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
 
-    # Обработчик сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # Обработчики кнопок
-    application.add_handler(CallbackQueryHandler(button_callback))  # для меню
-    application.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rate_"))  # для оценок
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rate_"))
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
     async def post_init(app: Application):
