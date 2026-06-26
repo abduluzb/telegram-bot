@@ -1,4 +1,4 @@
-# bot.py - Luna AI с многоуровневым меню и GitHub-поиском
+# bot.py - Luna AI с расширенным GitHub-поиском, показом и объяснением кода
 
 import os
 import asyncio
@@ -8,6 +8,7 @@ import re
 import aiohttp
 import io
 import requests
+import base64
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 import pytz
@@ -148,7 +149,7 @@ def get_user_timezone(timezone_str: str):
         pass
     return None
 
-# ============== ПОИСК В GITHUB ==============
+# ============== GITHUB ФУНКЦИИ ==============
 def search_github_code(query: str) -> Optional[List[Dict]]:
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return None
@@ -164,7 +165,7 @@ def search_github_code(query: str) -> Optional[List[Dict]]:
     try:
         response = requests.get(url, headers=headers, params=params)
         if response.status_code != 200:
-            logger.error(f"GitHub API error: {response.status_code}")
+            logger.error(f"GitHub API error: {response.status_code} - {response.text}")
             return None
         data = response.json()
         items = data.get("items", [])
@@ -176,6 +177,30 @@ def search_github_code(query: str) -> Optional[List[Dict]]:
         return results
     except Exception as e:
         logger.error(f"Ошибка поиска в GitHub: {e}")
+        return None
+
+def get_github_file_content(file_path: str) -> Optional[str]:
+    """Скачивает содержимое файла из репозитория."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            logger.error(f"GitHub API error: {response.status_code} - {response.text}")
+            return None
+        data = response.json()
+        content = data.get("content", "")
+        if content:
+            decoded = base64.b64decode(content).decode("utf-8")
+            return decoded
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка получения файла: {e}")
         return None
 
 # ============== ОСНОВНЫЕ ФУНКЦИИ ==============
@@ -514,8 +539,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
-        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
-        "• Владельцу: 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
+        "• Владельцу:\n"
+        "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
+        "   • 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
+        "   • 'луна показать файл <путь>' – показать содержимое файла из репозитория\n"
+        "   • 'луна объясни файл <путь>' – AI-объяснение кода файла\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
@@ -1028,7 +1056,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
         return
 
-    # Старые callback (approve, decline, weather, imagine, yt, wiki, stats, reset, help, all_commands, modes, setmode)
+    # Старые callback
     if data.startswith("approve_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -1121,7 +1149,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'",
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
+            "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
+            "Владельцу: «луна показать файл <путь>» — показать файл\n"
+            "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
@@ -1266,7 +1297,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-        # --- Поиск в GitHub (владелец) ---
+        # --- GitHub поиск (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
@@ -1288,6 +1319,95 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(lines) > 10:
                     lines = lines[:10] + ["... (показаны первые 10)"]
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
+                return
+
+        # --- Показать файл (владелец) ---
+        if is_owner(user_id):
+            match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
+            if match:
+                file_path = match.group(1).strip()
+                if not file_path:
+                    await message.reply_text("📝 Напишите путь к файлу: луна показать файл bot.py")
+                    return
+                status_msg = await message.reply_text(f"📂 Загружаю файл: {file_path}...")
+                content = get_github_file_content(file_path)
+                if content is None:
+                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`. Проверьте путь.")
+                    return
+                if len(content) > 4000:
+                    content = content[:4000] + "\n... (файл слишком большой, показана часть)"
+                # Определяем расширение для подсветки
+                ext = file_path.split('.')[-1] if '.' in file_path else ''
+                lang_map = {
+                    'py': 'python',
+                    'js': 'javascript',
+                    'html': 'html',
+                    'css': 'css',
+                    'json': 'json',
+                    'md': 'markdown',
+                    'txt': 'text',
+                    'sh': 'bash',
+                    'yml': 'yaml',
+                    'yaml': 'yaml',
+                    'toml': 'toml',
+                    'ini': 'ini',
+                    'sql': 'sql',
+                    'go': 'go',
+                    'java': 'java',
+                    'c': 'c',
+                    'cpp': 'cpp',
+                    'h': 'c',
+                    'hpp': 'cpp',
+                }
+                lang = lang_map.get(ext, '')
+                if lang:
+                    await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```{lang}\n{content}\n```", parse_mode='Markdown')
+                else:
+                    await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
+                return
+
+        # --- Объяснить файл (владелец) ---
+        if is_owner(user_id):
+            match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
+            if match:
+                file_path = match.group(1).strip()
+                if not file_path:
+                    await message.reply_text("📝 Напишите путь к файлу: луна объясни файл bot.py")
+                    return
+                status_msg = await message.reply_text(f"🧠 Загружаю и анализирую: {file_path}...")
+                content = get_github_file_content(file_path)
+                if content is None:
+                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`.")
+                    return
+                # Обрезаем для AI
+                if len(content) > 3000:
+                    content_for_ai = content[:3000] + "\n... (файл обрезан для анализа)"
+                else:
+                    content_for_ai = content
+                system_prompt = "Ты — эксперт по Python. Объясни этот код простым языком, выдели основные функции, возможные ошибки и рекомендации. Отвечай на русском языке."
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Вот код файла {file_path}:\n\n{content_for_ai}\n\nОбъясни, что он делает."}
+                ]
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: client.chat.completions.create(
+                                model=MODELS[0],
+                                messages=messages,
+                                max_tokens=800,
+                                temperature=0.5
+                            )
+                        ),
+                        timeout=25.0
+                    )
+                    explanation = response.choices[0].message.content.strip()
+                    await status_msg.edit_text(f"📖 **Объяснение файла `{file_path}`:**\n\n{explanation}", parse_mode='Markdown')
+                except asyncio.TimeoutError:
+                    await status_msg.edit_text("⏰ Превышено время ожидания ответа от AI.")
+                except Exception as e:
+                    await status_msg.edit_text(f"❌ Ошибка при анализе: {e}")
                 return
 
         # --- Вопросы о владельце ---
