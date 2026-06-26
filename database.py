@@ -1,11 +1,10 @@
-# database.py - полная версия с интересами, оценками и авто-переподключением
+# database.py - расширенная версия с историей пользователя
 
 import os
 import logging
 import time
 import re
 from typing import List, Optional, Dict, Any
-from collections import Counter
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Float, 
     DateTime, BigInteger, Boolean, ForeignKey, text
@@ -41,7 +40,6 @@ else:
         DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         logger.info(f"Используется MySQL (хост: {DB_HOST})")
 
-# Движок с настройками пула
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
@@ -123,8 +121,6 @@ class Config(Base):
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-# ----- НОВЫЕ МОДЕЛИ ДЛЯ УМНОСТИ -----
-
 class UserInterest(Base):
     __tablename__ = "user_interests"
     id = Column(Integer, primary_key=True, index=True)
@@ -135,15 +131,8 @@ class UserInterest(Base):
     last_mentioned = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-class ResponseRating(Base):
-    __tablename__ = "response_ratings"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, index=True)
-    bot_message_id = Column(BigInteger, nullable=True)
-    user_message = Column(Text)
-    bot_response = Column(Text)
-    rating = Column(Integer)  # 1 = 👍, -1 = 👎
-    created_at = Column(DateTime, default=datetime.utcnow)
+# Удаляем таблицу response_ratings, так как кнопки оценок убраны
+# Если она уже есть в БД, её можно удалить вручную, но мы просто не создаём.
 
 Base.metadata.create_all(bind=engine)
 
@@ -321,7 +310,7 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
-# ============== ПАМЯТЬ ЧАТА ==============
+# ============== ПАМЯТЬ ЧАТА И ИСТОРИЯ ПОЛЬЗОВАТЕЛЯ ==============
 
 @retry_on_disconnect
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
@@ -354,6 +343,15 @@ def get_chat_memory(chat_id, limit=10):
     session = get_session()
     try:
         records = session.query(ChatMemory).filter_by(chat_id=chat_id).order_by(ChatMemory.timestamp.desc()).limit(limit).all()
+        return [{"user_name": r.user_name, "text": r.text, "role": r.role} for r in reversed(records)]
+    finally:
+        session.close()
+
+def get_user_history(user_id, limit=30):
+    """Возвращает последние сообщения пользователя (из всех чатов)."""
+    session = get_session()
+    try:
+        records = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.desc()).limit(limit).all()
         return [{"user_name": r.user_name, "text": r.text, "role": r.role} for r in reversed(records)]
     finally:
         session.close()
@@ -484,7 +482,6 @@ def delete_note(note_id):
 
 # ============== ИНТЕРЕСЫ ПОЛЬЗОВАТЕЛЯ ==============
 
-# Стоп-слова для извлечения тем
 STOP_WORDS = {
     "и", "в", "на", "с", "по", "к", "у", "за", "из", "от", "до", "о", "об",
     "для", "без", "как", "что", "это", "этот", "весь", "все", "всё", "мой",
@@ -497,28 +494,21 @@ STOP_WORDS = {
 }
 
 def extract_topics(text: str) -> List[str]:
-    """Извлекает ключевые темы из текста"""
     if not text:
         return []
     text_lower = text.lower()
-    # Убираем пунктуацию, оставляем только буквы и цифры
     words = re.findall(r'\b[a-zа-яё0-9]{3,}\b', text_lower)
-    # Фильтруем стоп-слова
     topics = [w for w in words if w not in STOP_WORDS and len(w) > 2]
-    # Добавляем биграммы (пары слов)
     bigrams = []
     for i in range(len(words)-1):
         bg = words[i] + " " + words[i+1]
         if len(bg) > 3 and bg not in STOP_WORDS:
             bigrams.append(bg)
     all_topics = topics + bigrams
-    # Убираем дубли и слишком длинные фразы
-    unique = list(set([t for t in all_topics if len(t) < 30]))
-    return unique
+    return list(set([t for t in all_topics if len(t) < 30]))
 
 @retry_on_disconnect
 def update_user_interests(user_id: int, text: str):
-    """Обновляет интересы пользователя на основе текста"""
     topics = extract_topics(text)
     if not topics:
         return
@@ -540,7 +530,6 @@ def update_user_interests(user_id: int, text: str):
                     last_mentioned=datetime.utcnow()
                 )
                 session.add(interest)
-        # Оставляем только топ-20 интересов по весу
         all_interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).all()
         if len(all_interests) > 20:
             for interest in all_interests[20:]:
@@ -553,7 +542,6 @@ def update_user_interests(user_id: int, text: str):
         session.close()
 
 def get_user_interests(user_id: int, limit: int = 5) -> List[str]:
-    """Возвращает список самых сильных интересов пользователя"""
     session = get_session()
     try:
         interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).limit(limit).all()
@@ -561,41 +549,6 @@ def get_user_interests(user_id: int, limit: int = 5) -> List[str]:
     except Exception as e:
         logger.error(f"Ошибка get_user_interests: {e}")
         return []
-    finally:
-        session.close()
-
-# ============== ОЦЕНКИ ОТВЕТОВ ==============
-
-@retry_on_disconnect
-def save_response_rating(user_id: int, user_message: str, bot_response: str, rating: int):
-    """Сохраняет оценку ответа (1 = 👍, -1 = 👎)"""
-    session = get_session()
-    try:
-        rating_obj = ResponseRating(
-            user_id=user_id,
-            user_message=user_message[:500],
-            bot_response=bot_response[:500],
-            rating=rating,
-            created_at=datetime.utcnow()
-        )
-        session.add(rating_obj)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Ошибка save_response_rating: {e}")
-    finally:
-        session.close()
-
-def get_user_rating_stats(user_id: int) -> Dict[str, int]:
-    """Возвращает статистику оценок пользователя (положительные, отрицательные)"""
-    session = get_session()
-    try:
-        positive = session.query(ResponseRating).filter_by(user_id=user_id, rating=1).count()
-        negative = session.query(ResponseRating).filter_by(user_id=user_id, rating=-1).count()
-        return {"positive": positive, "negative": negative}
-    except Exception as e:
-        logger.error(f"Ошибка get_user_rating_stats: {e}")
-        return {"positive": 0, "negative": 0}
     finally:
         session.close()
 
@@ -614,7 +567,6 @@ def clear_table(table_name: str) -> bool:
             "notes": Note,
             "config": Config,
             "user_interests": UserInterest,
-            "response_ratings": ResponseRating,
         }
         if table_name not in valid:
             logger.warning(f"Попытка очистить недопустимую таблицу: {table_name}")

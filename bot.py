@@ -1,4 +1,4 @@
-# bot.py - финальная версия с интеллектуальными улучшениями
+# bot.py - финальная версия без оценок, с историей пользователя
 
 import os
 import asyncio
@@ -54,8 +54,7 @@ from database import (
     clear_table,
     update_user_interests,
     get_user_interests,
-    save_response_rating,
-    get_user_rating_stats,
+    get_user_history,
 )
 
 # ============== НАСТРОЙКИ ==============
@@ -167,21 +166,26 @@ def clear_memory(user_id: int, chat_id: int = None):
         clear_chat_memory(chat_id)
 
 def build_context(chat_id: int, user_id: int, user_name: str) -> str:
-    chat_history = get_chat_memory(chat_id, limit=10)
+    # Получаем историю пользователя из БД (последние 30 сообщений)
+    user_history = get_user_history(user_id, limit=30)
+    # Локальная память пользователя (краткосрочная)
     user_hist = get_user_memory(user_id)
     members = get_chat_members(chat_id)
     parts = []
-    if chat_history:
-        parts.append("=== История чата ===")
-        for msg in chat_history:
+
+    if user_history:
+        parts.append("=== История твоих сообщений (из БД) ===")
+        for msg in user_history:
             parts.append(f"{msg['user_name']}: {msg['text']}")
         parts.append("")
+
     if user_hist:
-        parts.append("=== Твоя история ===")
+        parts.append("=== Твоя краткосрочная память ===")
         for msg in user_hist[-5:]:
             role = "Ты" if msg["role"] == "user" else "Я"
             parts.append(f"{role}: {msg['text']}")
         parts.append("")
+
     parts.append(f"=== Информация ===")
     parts.append(f"Участников: {len(members)}")
     parts.append(f"Пользователь: {user_name}")
@@ -473,7 +477,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
-        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests, response_ratings) или 'все'\n"
+        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
@@ -890,8 +894,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== ОБРАБОТЧИКИ КНОПОК ==============
-
+# ============== КНОПКИ МЕНЮ ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -991,7 +994,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests, response_ratings) или 'все'",
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
@@ -1018,22 +1021,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_global_mode(mode)
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
-
-async def rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    data = query.data
-
-    if data.startswith("rate_"):
-        rating = 1 if "like" in data else -1
-        try:
-            save_response_rating(user_id, "оценка", "оценка", rating)
-            emoji = "👍" if rating == 1 else "👎"
-            await query.edit_message_text(f"Спасибо за оценку {emoji}!")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения оценки: {e}")
-            await query.edit_message_text("⚠️ Не удалось сохранить оценку.")
 
 # ============== ОСНОВНАЯ ЛОГИКА ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1102,7 +1089,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 table_name = match.group(1).lower()
                 valid_tables = [
                     "user_stats", "user_info", "chat_memory", "violations",
-                    "reminders", "notes", "config", "user_interests", "response_ratings"
+                    "reminders", "notes", "config", "user_interests"
                 ]
                 if table_name in ["все", "all", "всех"]:
                     cleared = []
@@ -1363,20 +1350,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_to_user_memory(user_id, reply_text, "assistant")
         add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
 
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("👍 Понравилось", callback_data=f"rate_like_{user_id}"),
-                InlineKeyboardButton("👎 Не понравилось", callback_data=f"rate_dislike_{user_id}"),
-            ]
-        ])
-
         if len(reply_text) > 4000:
             for i in range(0, len(reply_text), 4000):
                 await thinking_msg.edit_text(reply_text[i:i+4000])
                 if i + 4000 < len(reply_text):
                     thinking_msg = await message.reply_text("📄 Продолжение...")
         else:
-            await thinking_msg.edit_text(reply_text, reply_markup=keyboard)
+            await thinking_msg.edit_text(reply_text)
 
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}")
@@ -1485,7 +1465,6 @@ def main():
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(CallbackQueryHandler(rating_callback, pattern=r"^rate_"))
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
     async def post_init(app: Application):
@@ -1555,7 +1534,6 @@ def main():
     logger.info("📌 Бот отвечает на упоминания и слово 'луна' в группах")
     logger.info("📊 Статистика пользователей сохраняется в БД")
     logger.info("🧠 Интересы пользователей анализируются и сохраняются")
-    logger.info("👍 Оценки ответов собираются через кнопки")
     logger.info("📋 Команды установлены для подсказки")
     logger.info("🔄 Запуск polling...")
 
