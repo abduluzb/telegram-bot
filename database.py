@@ -1,11 +1,17 @@
-# database.py - исправленная версия с text() для SQLAlchemy 2.0
+# database.py - полная версия с интересами, оценками и авто-переподключением
 
 import os
 import logging
 import time
-from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, BigInteger, text
+import re
+from typing import List, Optional, Dict, Any
+from collections import Counter
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Text, Float, 
+    DateTime, BigInteger, Boolean, ForeignKey, text
+)
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.exc import OperationalError, InterfaceError
 from datetime import datetime
 
@@ -35,7 +41,7 @@ else:
         DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         logger.info(f"Используется MySQL (хост: {DB_HOST})")
 
-# Создаём движок с улучшенными настройками пула
+# Движок с настройками пула
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
@@ -117,15 +123,35 @@ class Config(Base):
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+# ----- НОВЫЕ МОДЕЛИ ДЛЯ УМНОСТИ -----
+
+class UserInterest(Base):
+    __tablename__ = "user_interests"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, index=True)
+    topic = Column(String(100))
+    weight = Column(Float, default=1.0)
+    mentions = Column(Integer, default=1)
+    last_mentioned = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ResponseRating(Base):
+    __tablename__ = "response_ratings"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, index=True)
+    bot_message_id = Column(BigInteger, nullable=True)
+    user_message = Column(Text)
+    bot_response = Column(Text)
+    rating = Column(Integer)  # 1 = 👍, -1 = 👎
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 Base.metadata.create_all(bind=engine)
 
 # ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
 
 def get_session():
-    """Создаёт новую сессию с проверкой соединения."""
     session = SessionLocal()
     try:
-        # Проверяем, что соединение живое – используем text()
         session.execute(text("SELECT 1"))
     except (OperationalError, InterfaceError) as e:
         logger.warning(f"Соединение потеряно, переподключаемся: {e}")
@@ -135,7 +161,6 @@ def get_session():
     return session
 
 def retry_on_disconnect(func):
-    """Декоратор для повторных попыток при ошибке соединения."""
     def wrapper(*args, **kwargs):
         max_retries = 3
         for attempt in range(max_retries):
@@ -150,16 +175,13 @@ def retry_on_disconnect(func):
                 continue
     return wrapper
 
-# ============== ФУНКЦИИ ДЛЯ РАБОТЫ С БД (с обёрткой retry) ==============
+# ============== ГЛОБАЛЬНЫЙ РЕЖИМ ==============
 
-# ----- Глобальный режим -----
 def get_global_mode(default="fast") -> str:
     session = get_session()
     try:
         config = session.query(Config).filter_by(key="global_mode").first()
-        if config and config.value:
-            return config.value
-        return default
+        return config.value if config and config.value else default
     except Exception as e:
         logger.error(f"Ошибка получения глобального режима: {e}")
         return default
@@ -167,8 +189,8 @@ def get_global_mode(default="fast") -> str:
         session.close()
 
 def set_global_mode(mode: str) -> None:
-    valid_modes = ["fast", "smart", "sarcastic", "flirt"]
-    if mode not in valid_modes:
+    valid = ["fast", "smart", "sarcastic", "flirt"]
+    if mode not in valid:
         raise ValueError(f"Некорректный режим: {mode}")
     session = get_session()
     try:
@@ -187,7 +209,8 @@ def set_global_mode(mode: str) -> None:
     finally:
         session.close()
 
-# ----- Информация о пользователе (UserInfo) -----
+# ============== ПОЛЬЗОВАТЕЛЬСКАЯ ИНФОРМАЦИЯ ==============
+
 @retry_on_disconnect
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
     session = get_session()
@@ -203,17 +226,17 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             )
             session.add(user_info)
             session.commit()
-            logger.info(f"Создана запись UserInfo для user_id={user_id}")
         else:
+            updated = False
             if username and user_info.username != username:
-                user_info.username = username
+                user_info.username = username; updated = True
             if first_name and user_info.first_name != first_name:
-                user_info.first_name = first_name
+                user_info.first_name = first_name; updated = True
             if last_name and user_info.last_name != last_name:
-                user_info.last_name = last_name
+                user_info.last_name = last_name; updated = True
             if language_code and user_info.language_code != language_code:
-                user_info.language_code = language_code
-            if any([username, first_name, last_name, language_code]):
+                user_info.language_code = language_code; updated = True
+            if updated:
                 user_info.updated_at = datetime.utcnow()
                 session.commit()
         return {
@@ -227,7 +250,7 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
         }
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка получения/создания UserInfo: {e}")
+        logger.error(f"Ошибка в get_or_create_user_info: {e}")
         return None
     finally:
         session.close()
@@ -237,15 +260,15 @@ def update_user_city_timezone(user_id, city=None, timezone=None):
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
-        if user_info:
-            if city:
-                user_info.city = city
-            if timezone:
-                user_info.timezone = timezone
-            user_info.updated_at = datetime.utcnow()
-            session.commit()
-            return True
-        return False
+        if not user_info:
+            return False
+        if city:
+            user_info.city = city
+        if timezone:
+            user_info.timezone = timezone
+        user_info.updated_at = datetime.utcnow()
+        session.commit()
+        return True
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка обновления city/timezone: {e}")
@@ -253,32 +276,26 @@ def update_user_city_timezone(user_id, city=None, timezone=None):
     finally:
         session.close()
 
-# ----- Статистика (UserStats) -----
+# ============== СТАТИСТИКА ==============
+
 @retry_on_disconnect
 def update_user_stats(user_id, text, username=None, first_name=None):
     session = get_session()
     try:
         user = session.query(UserStats).filter_by(user_id=user_id).first()
         if not user:
-            user = UserStats(
-                user_id=user_id,
-                username=username,
-                first_name=first_name,
-                messages_count=0,
-                avg_len=0.0
-            )
+            user = UserStats(user_id=user_id, username=username, first_name=first_name,
+                             messages_count=0, avg_len=0.0)
             session.add(user)
         else:
             if username:
                 user.username = username
             if first_name:
                 user.first_name = first_name
-
         if user.messages_count is None:
             user.messages_count = 0
         if user.avg_len is None:
             user.avg_len = 0.0
-
         old_total = user.messages_count * user.avg_len
         user.messages_count += 1
         user.avg_len = (old_total + len(text)) / user.messages_count
@@ -286,7 +303,7 @@ def update_user_stats(user_id, text, username=None, first_name=None):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка обновления статистики: {e}")
+        logger.error(f"Ошибка update_user_stats: {e}")
     finally:
         session.close()
 
@@ -304,7 +321,8 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
-# ----- Память чата (ChatMemory) -----
+# ============== ПАМЯТЬ ЧАТА ==============
+
 @retry_on_disconnect
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
@@ -328,7 +346,7 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
                 session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка добавления в память чата: {e}")
+        logger.error(f"Ошибка add_chat_memory: {e}")
     finally:
         session.close()
 
@@ -347,18 +365,17 @@ def clear_chat_memory(chat_id):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка очистки памяти чата: {e}")
+        logger.error(f"Ошибка clear_chat_memory: {e}")
     finally:
         session.close()
 
-# ----- Нарушения -----
+# ============== НАРУШЕНИЯ ==============
+
 def get_violations(user_id):
     session = get_session()
     try:
         viol = session.query(Violation).filter_by(user_id=user_id).first()
-        if viol:
-            return {"count": viol.count, "ban_until": viol.ban_until}
-        return None
+        return {"count": viol.count, "ban_until": viol.ban_until} if viol else None
     finally:
         session.close()
 
@@ -378,7 +395,7 @@ def update_violation(user_id, chat_id, increment=1, ban_until=None):
         return viol.count
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка обновления нарушений: {e}")
+        logger.error(f"Ошибка update_violation: {e}")
     finally:
         session.close()
 
@@ -389,11 +406,12 @@ def clear_violation(user_id):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка очистки нарушений: {e}")
+        logger.error(f"Ошибка clear_violation: {e}")
     finally:
         session.close()
 
-# ----- Напоминания -----
+# ============== НАПОМИНАНИЯ ==============
+
 @retry_on_disconnect
 def add_reminder(user_id, chat_id, text, timestamp):
     session = get_session()
@@ -403,7 +421,7 @@ def add_reminder(user_id, chat_id, text, timestamp):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка добавления напоминания: {e}")
+        logger.error(f"Ошибка add_reminder: {e}")
     finally:
         session.close()
 
@@ -422,11 +440,12 @@ def delete_reminder(reminder_id):
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка удаления напоминания: {e}")
+        logger.error(f"Ошибка delete_reminder: {e}")
     finally:
         session.close()
 
-# ----- Заметки (Notes) -----
+# ============== ЗАМЕТКИ ==============
+
 @retry_on_disconnect
 def add_note(user_id, text):
     session = get_session()
@@ -437,7 +456,7 @@ def add_note(user_id, text):
         return True
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка добавления заметки: {e}")
+        logger.error(f"Ошибка add_note: {e}")
         return False
     finally:
         session.close()
@@ -458,17 +477,135 @@ def delete_note(note_id):
         return True
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка удаления заметки: {e}")
+        logger.error(f"Ошибка delete_note: {e}")
         return False
     finally:
         session.close()
 
-# ----- Очистка таблиц (для владельца) -----
+# ============== ИНТЕРЕСЫ ПОЛЬЗОВАТЕЛЯ ==============
+
+# Стоп-слова для извлечения тем
+STOP_WORDS = {
+    "и", "в", "на", "с", "по", "к", "у", "за", "из", "от", "до", "о", "об",
+    "для", "без", "как", "что", "это", "этот", "весь", "все", "всё", "мой",
+    "твой", "его", "её", "их", "наш", "ваш", "кто", "что", "где", "когда",
+    "почему", "как", "какой", "сколько", "зачем", "а", "но", "и", "или",
+    "если", "то", "чтобы", "так", "же", "бы", "да", "нет", "уже", "ещё",
+    "очень", "слишком", "также", "тоже", "потому", "поэтому", "ведь",
+    "вот", "вон", "ли", "уж", "же", "вдруг", "раз", "два", "три", "четыре",
+    "пять", "десять", "сто", "тысяча", "миллион"
+}
+
+def extract_topics(text: str) -> List[str]:
+    """Извлекает ключевые темы из текста"""
+    if not text:
+        return []
+    text_lower = text.lower()
+    # Убираем пунктуацию, оставляем только буквы и цифры
+    words = re.findall(r'\b[a-zа-яё0-9]{3,}\b', text_lower)
+    # Фильтруем стоп-слова
+    topics = [w for w in words if w not in STOP_WORDS and len(w) > 2]
+    # Добавляем биграммы (пары слов)
+    bigrams = []
+    for i in range(len(words)-1):
+        bg = words[i] + " " + words[i+1]
+        if len(bg) > 3 and bg not in STOP_WORDS:
+            bigrams.append(bg)
+    all_topics = topics + bigrams
+    # Убираем дубли и слишком длинные фразы
+    unique = list(set([t for t in all_topics if len(t) < 30]))
+    return unique
+
+@retry_on_disconnect
+def update_user_interests(user_id: int, text: str):
+    """Обновляет интересы пользователя на основе текста"""
+    topics = extract_topics(text)
+    if not topics:
+        return
+    session = get_session()
+    try:
+        existing = {t.topic: t for t in session.query(UserInterest).filter_by(user_id=user_id).all()}
+        for topic in topics:
+            if topic in existing:
+                interest = existing[topic]
+                interest.mentions += 1
+                interest.weight += 0.5
+                interest.last_mentioned = datetime.utcnow()
+            else:
+                interest = UserInterest(
+                    user_id=user_id,
+                    topic=topic,
+                    weight=1.0,
+                    mentions=1,
+                    last_mentioned=datetime.utcnow()
+                )
+                session.add(interest)
+        # Оставляем только топ-20 интересов по весу
+        all_interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).all()
+        if len(all_interests) > 20:
+            for interest in all_interests[20:]:
+                session.delete(interest)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка update_user_interests: {e}")
+    finally:
+        session.close()
+
+def get_user_interests(user_id: int, limit: int = 5) -> List[str]:
+    """Возвращает список самых сильных интересов пользователя"""
+    session = get_session()
+    try:
+        interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).limit(limit).all()
+        return [i.topic for i in interests]
+    except Exception as e:
+        logger.error(f"Ошибка get_user_interests: {e}")
+        return []
+    finally:
+        session.close()
+
+# ============== ОЦЕНКИ ОТВЕТОВ ==============
+
+@retry_on_disconnect
+def save_response_rating(user_id: int, user_message: str, bot_response: str, rating: int):
+    """Сохраняет оценку ответа (1 = 👍, -1 = 👎)"""
+    session = get_session()
+    try:
+        rating_obj = ResponseRating(
+            user_id=user_id,
+            user_message=user_message[:500],
+            bot_response=bot_response[:500],
+            rating=rating,
+            created_at=datetime.utcnow()
+        )
+        session.add(rating_obj)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка save_response_rating: {e}")
+    finally:
+        session.close()
+
+def get_user_rating_stats(user_id: int) -> Dict[str, int]:
+    """Возвращает статистику оценок пользователя (положительные, отрицательные)"""
+    session = get_session()
+    try:
+        positive = session.query(ResponseRating).filter_by(user_id=user_id, rating=1).count()
+        negative = session.query(ResponseRating).filter_by(user_id=user_id, rating=-1).count()
+        return {"positive": positive, "negative": negative}
+    except Exception as e:
+        logger.error(f"Ошибка get_user_rating_stats: {e}")
+        return {"positive": 0, "negative": 0}
+    finally:
+        session.close()
+
+# ============== ОЧИСТКА ТАБЛИЦ ==============
+
 @retry_on_disconnect
 def clear_table(table_name: str) -> bool:
     session = get_session()
     try:
-        valid_tables = {
+        valid = {
             "user_stats": UserStats,
             "user_info": UserInfo,
             "chat_memory": ChatMemory,
@@ -476,23 +613,26 @@ def clear_table(table_name: str) -> bool:
             "reminders": Reminder,
             "notes": Note,
             "config": Config,
+            "user_interests": UserInterest,
+            "response_ratings": ResponseRating,
         }
-        if table_name not in valid_tables:
+        if table_name not in valid:
             logger.warning(f"Попытка очистить недопустимую таблицу: {table_name}")
             return False
-        model = valid_tables[table_name]
+        model = valid[table_name]
         deleted = session.query(model).delete()
         session.commit()
-        logger.info(f"Очищена таблица {table_name}, удалено записей: {deleted}")
+        logger.info(f"Очищена таблица {table_name}, удалено {deleted} записей")
         return True
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка очистки таблицы {table_name}: {e}")
+        logger.error(f"Ошибка clear_table: {e}")
         return False
     finally:
         session.close()
 
-# ----- Инициализация -----
+# ============== ИНИЦИАЛИЗАЦИЯ ==============
+
 def init_db():
     try:
         session = get_session()
