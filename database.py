@@ -1,10 +1,12 @@
-# database.py - полная версия с поддержкой SQLite/MySQL и функциями для бота
+# database.py - с автоматическим переподключением и защитой от закрытых соединений
 
 import os
 import logging
+import time
 from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError, InterfaceError
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,18 @@ else:
         DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
         logger.info(f"Используется MySQL (хост: {DB_HOST})")
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
-SessionLocal = sessionmaker(bind=engine)
+# Создаём движок с улучшенными настройками пула
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,      # Проверяем соединение перед использованием
+    pool_recycle=3600,       # Пересоздаём соединения раз в час
+    pool_size=5,             # Максимум 5 соединений в пуле
+    max_overflow=10,         # Дополнительные 10 при необходимости
+    pool_timeout=30,         # Таймаут ожидания соединения
+    echo=False               # Отключаем логи SQL (можно включить для отладки)
+)
+
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
 # ============== МОДЕЛИ ==============
@@ -107,10 +119,40 @@ class Config(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ============== ФУНКЦИИ ==============
+# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
 
 def get_session():
-    return SessionLocal()
+    """Создаёт новую сессию с проверкой соединения."""
+    session = SessionLocal()
+    try:
+        # Проверяем, что соединение живое
+        session.execute("SELECT 1")
+    except (OperationalError, InterfaceError) as e:
+        logger.warning(f"Соединение потеряно, переподключаемся: {e}")
+        session.rollback()
+        session.close()
+        # Создаём новую сессию
+        session = SessionLocal()
+    return session
+
+def retry_on_disconnect(func):
+    """Декоратор для повторных попыток при ошибке соединения."""
+    def wrapper(*args, **kwargs):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except (OperationalError, InterfaceError) as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Ошибка после {max_retries} попыток: {e}")
+                    raise
+                logger.warning(f"Ошибка соединения, попытка {attempt+1}: {e}")
+                time.sleep(1)
+                # Пересоздаём сессию внутри функции
+                continue
+    return wrapper
+
+# ============== ФУНКЦИИ ДЛЯ РАБОТЫ С БД (с обёрткой retry) ==============
 
 # ----- Глобальный режим -----
 def get_global_mode(default="fast") -> str:
@@ -148,8 +190,9 @@ def set_global_mode(mode: str) -> None:
         session.close()
 
 # ----- Информация о пользователе (UserInfo) -----
+@retry_on_disconnect
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
-    """Возвращает словарь с данными пользователя, а не объект."""
+    """Возвращает словарь с данными пользователя."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -176,7 +219,6 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             if any([username, first_name, last_name, language_code]):
                 user_info.updated_at = datetime.utcnow()
                 session.commit()
-        # Возвращаем словарь с нужными данными
         return {
             "user_id": user_info.user_id,
             "username": user_info.username,
@@ -193,6 +235,7 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
     finally:
         session.close()
 
+@retry_on_disconnect
 def update_user_city_timezone(user_id, city=None, timezone=None):
     session = get_session()
     try:
@@ -214,6 +257,7 @@ def update_user_city_timezone(user_id, city=None, timezone=None):
         session.close()
 
 # ----- Статистика (UserStats) -----
+@retry_on_disconnect
 def update_user_stats(user_id, text, username=None, first_name=None):
     session = get_session()
     try:
@@ -263,7 +307,8 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
-# ----- Память чата (ChatMemory) с ограничением 100 записей на пользователя -----
+# ----- Память чата (ChatMemory) -----
+@retry_on_disconnect
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
     try:
@@ -277,15 +322,13 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
         )
         session.add(memory)
         session.commit()
-        # Проверяем количество записей для этого пользователя
+        # Ограничение 100 записей на пользователя
         count = session.query(ChatMemory).filter_by(user_id=user_id).count()
         if count > 100:
-            # Удаляем самую старую запись для этого пользователя
             oldest = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.asc()).first()
             if oldest:
                 session.delete(oldest)
                 session.commit()
-                logger.info(f"Удалена старая запись из chat_memory для user_id={user_id}")
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка добавления в память чата: {e}")
@@ -322,6 +365,7 @@ def get_violations(user_id):
     finally:
         session.close()
 
+@retry_on_disconnect
 def update_violation(user_id, chat_id, increment=1, ban_until=None):
     session = get_session()
     try:
@@ -353,6 +397,7 @@ def clear_violation(user_id):
         session.close()
 
 # ----- Напоминания -----
+@retry_on_disconnect
 def add_reminder(user_id, chat_id, text, timestamp):
     session = get_session()
     try:
@@ -385,6 +430,7 @@ def delete_reminder(reminder_id):
         session.close()
 
 # ----- Заметки (Notes) -----
+@retry_on_disconnect
 def add_note(user_id, text):
     session = get_session()
     try:
@@ -421,14 +467,10 @@ def delete_note(note_id):
         session.close()
 
 # ----- Очистка таблиц (для владельца) -----
+@retry_on_disconnect
 def clear_table(table_name: str) -> bool:
-    """
-    Очищает указанную таблицу.
-    Возвращает True при успехе, иначе False.
-    """
     session = get_session()
     try:
-        # Список допустимых таблиц (для безопасности)
         valid_tables = {
             "user_stats": UserStats,
             "user_info": UserInfo,
@@ -455,4 +497,12 @@ def clear_table(table_name: str) -> bool:
 
 # ----- Инициализация -----
 def init_db():
-    logger.info("✅ База данных инициализирована")
+    # Проверяем подключение при старте
+    try:
+        session = get_session()
+        session.execute("SELECT 1")
+        session.close()
+        logger.info("✅ База данных инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения к базе данных: {e}")
+        raise
