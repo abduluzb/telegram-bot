@@ -1,9 +1,9 @@
-# database.py - с автоматическим переподключением и защитой от закрытых соединений
+# database.py - исправленная версия с text() для SQLAlchemy 2.0
 
 import os
 import logging
 import time
-from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, BigInteger
+from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, BigInteger, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError, InterfaceError
@@ -38,12 +38,12 @@ else:
 # Создаём движок с улучшенными настройками пула
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,      # Проверяем соединение перед использованием
-    pool_recycle=3600,       # Пересоздаём соединения раз в час
-    pool_size=5,             # Максимум 5 соединений в пуле
-    max_overflow=10,         # Дополнительные 10 при необходимости
-    pool_timeout=30,         # Таймаут ожидания соединения
-    echo=False               # Отключаем логи SQL (можно включить для отладки)
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    echo=False
 )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -125,13 +125,12 @@ def get_session():
     """Создаёт новую сессию с проверкой соединения."""
     session = SessionLocal()
     try:
-        # Проверяем, что соединение живое
-        session.execute("SELECT 1")
+        # Проверяем, что соединение живое – используем text()
+        session.execute(text("SELECT 1"))
     except (OperationalError, InterfaceError) as e:
         logger.warning(f"Соединение потеряно, переподключаемся: {e}")
         session.rollback()
         session.close()
-        # Создаём новую сессию
         session = SessionLocal()
     return session
 
@@ -148,7 +147,6 @@ def retry_on_disconnect(func):
                     raise
                 logger.warning(f"Ошибка соединения, попытка {attempt+1}: {e}")
                 time.sleep(1)
-                # Пересоздаём сессию внутри функции
                 continue
     return wrapper
 
@@ -192,7 +190,6 @@ def set_global_mode(mode: str) -> None:
 # ----- Информация о пользователе (UserInfo) -----
 @retry_on_disconnect
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
-    """Возвращает словарь с данными пользователя."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -497,10 +494,9 @@ def clear_table(table_name: str) -> bool:
 
 # ----- Инициализация -----
 def init_db():
-    # Проверяем подключение при старте
     try:
         session = get_session()
-        session.execute("SELECT 1")
+        session.execute(text("SELECT 1"))
         session.close()
         logger.info("✅ База данных инициализирована")
     except Exception as e:
