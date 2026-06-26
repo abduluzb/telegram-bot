@@ -1,4 +1,4 @@
-# bot.py - финальная версия без оценок, с историей пользователя
+# bot.py - Luna AI с многоуровневым меню и GitHub-поиском
 
 import os
 import asyncio
@@ -7,6 +7,7 @@ import time
 import re
 import aiohttp
 import io
+import requests
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 import pytz
@@ -55,6 +56,15 @@ from database import (
     update_user_interests,
     get_user_interests,
     get_user_history,
+    get_session,
+    UserStats,
+    UserInfo,
+    ChatMemory,
+    Violation,
+    Reminder,
+    Note,
+    Config,
+    UserInterest,
 )
 
 # ============== НАСТРОЙКИ ==============
@@ -64,6 +74,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в .env файле!")
@@ -136,6 +148,36 @@ def get_user_timezone(timezone_str: str):
         pass
     return None
 
+# ============== ПОИСК В GITHUB ==============
+def search_github_code(query: str) -> Optional[List[Dict]]:
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    url = "https://api.github.com/search/code"
+    params = {
+        "q": f"{query}+repo:{GITHUB_REPO}",
+        "per_page": 10
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code != 200:
+            logger.error(f"GitHub API error: {response.status_code}")
+            return None
+        data = response.json()
+        items = data.get("items", [])
+        results = []
+        for item in items:
+            file_path = item.get("path")
+            html_url = item.get("html_url")
+            results.append({"path": file_path, "url": html_url})
+        return results
+    except Exception as e:
+        logger.error(f"Ошибка поиска в GitHub: {e}")
+        return None
+
 # ============== ОСНОВНЫЕ ФУНКЦИИ ==============
 def get_chat_members(chat_id: int) -> Set[int]:
     if chat_id not in chat_members:
@@ -166,26 +208,21 @@ def clear_memory(user_id: int, chat_id: int = None):
         clear_chat_memory(chat_id)
 
 def build_context(chat_id: int, user_id: int, user_name: str) -> str:
-    # Получаем историю пользователя из БД (последние 30 сообщений)
     user_history = get_user_history(user_id, limit=30)
-    # Локальная память пользователя (краткосрочная)
     user_hist = get_user_memory(user_id)
     members = get_chat_members(chat_id)
     parts = []
-
     if user_history:
         parts.append("=== История твоих сообщений (из БД) ===")
         for msg in user_history:
             parts.append(f"{msg['user_name']}: {msg['text']}")
         parts.append("")
-
     if user_hist:
         parts.append("=== Твоя краткосрочная память ===")
         for msg in user_hist[-5:]:
             role = "Ты" if msg["role"] == "user" else "Я"
             parts.append(f"{role}: {msg['text']}")
         parts.append("")
-
     parts.append(f"=== Информация ===")
     parts.append(f"Участников: {len(members)}")
     parts.append(f"Пользователь: {user_name}")
@@ -478,6 +515,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
         "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
+        "• Владельцу: 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
         "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
@@ -553,7 +591,6 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not context.args:
         user_id = update.effective_user.id
-        from database import get_session, UserInfo
         session = get_session()
         try:
             user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
@@ -722,7 +759,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    from database import get_session, ChatMemory
     session = get_session()
     try:
         count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
@@ -894,13 +930,105 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== КНОПКИ МЕНЮ ==============
+# ============== АДМИН-ПАНЕЛЬ ==============
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    keyboard = [
+        [InlineKeyboardButton("🔍 Поиск в коде", callback_data="search_code")],
+        [InlineKeyboardButton("🧹 Очистить таблицу", callback_data="clear_table_menu")],
+        [InlineKeyboardButton("📊 Статистика БД", callback_data="db_stats")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+    ]
+    await query.edit_message_text("👑 **Админ панель**\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def clear_table_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "user_interests"]
+    keyboard = []
+    for t in tables:
+        keyboard.append([InlineKeyboardButton(f"🗑️ {t}", callback_data=f"clear_table_{t}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
+    await query.edit_message_text("🧹 **Выберите таблицу для очистки:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def db_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    session = get_session()
+    stats = {}
+    try:
+        stats["user_stats"] = session.query(UserStats).count()
+        stats["user_info"] = session.query(UserInfo).count()
+        stats["chat_memory"] = session.query(ChatMemory).count()
+        stats["violations"] = session.query(Violation).count()
+        stats["reminders"] = session.query(Reminder).count()
+        stats["notes"] = session.query(Note).count()
+        stats["config"] = session.query(Config).count()
+        stats["user_interests"] = session.query(UserInterest).count()
+    finally:
+        session.close()
+    lines = ["📊 **Статистика базы данных:**"]
+    for table, count in stats.items():
+        lines.append(f"• `{table}`: {count} записей")
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def search_code_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+    await query.edit_message_text(
+        "🔍 **Поиск в коде**\n\n"
+        "Напишите текст для поиска в репозитории.\n"
+        "Используйте команду: `луна искать в коде <текст>`\n"
+        "Или просто отправьте текст, и я поищу.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+# ============== ОБРАБОТЧИК КНОПОК ==============
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     data = query.data
 
+    if data == "admin_panel":
+        await admin_panel(update, context)
+        return
+    elif data == "clear_table_menu":
+        await clear_table_menu(update, context)
+        return
+    elif data == "db_stats":
+        await db_stats(update, context)
+        return
+    elif data == "search_code":
+        await search_code_prompt(update, context)
+        return
+    elif data == "back_to_main":
+        await query.edit_message_text("🔙 Главное меню", reply_markup=get_main_menu_keyboard())
+        return
+    elif data.startswith("clear_table_"):
+        table_name = data.replace("clear_table_", "")
+        if is_owner(user_id):
+            if clear_table(table_name):
+                await query.edit_message_text(f"✅ Таблица `{table_name}` очищена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="clear_table_menu")]]), parse_mode='Markdown')
+            else:
+                await query.edit_message_text(f"❌ Ошибка очистки `{table_name}`.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="clear_table_menu")]]), parse_mode='Markdown')
+        else:
+            await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+
+    # Старые callback (approve, decline, weather, imagine, yt, wiki, stats, reset, help, all_commands, modes, setmode)
     if data.startswith("approve_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -919,7 +1047,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    elif data.startswith("decline_"):
+    if data.startswith("decline_"):
         parts = data.split("_")
         if len(parts) == 3:
             user_id_req = int(parts[1])
@@ -937,7 +1065,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    elif data == "weather":
+    if data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через /setcity", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
         await query.edit_message_text("🎨 Напиши /imagine <описание>, например: /imagine кот в шляпе на луне", reply_markup=get_main_menu_keyboard())
@@ -948,7 +1076,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stats":
         chat_id = update.effective_chat.id
         members = get_chat_members(chat_id)
-        from database import get_session, ChatMemory
         session = get_session()
         try:
             count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
@@ -1022,6 +1149,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
+# ============== ГЛАВНОЕ МЕНЮ ==============
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [
+            InlineKeyboardButton("🌤️ Погода", callback_data="weather"),
+            InlineKeyboardButton("🎨 Картинка", callback_data="imagine"),
+        ],
+        [
+            InlineKeyboardButton("🎬 YouTube", callback_data="yt"),
+            InlineKeyboardButton("📖 Википедия", callback_data="wiki"),
+        ],
+        [
+            InlineKeyboardButton("📊 Статистика", callback_data="stats"),
+            InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
+        ],
+        [
+            InlineKeyboardButton("🌍 Город", callback_data="city_menu"),
+            InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
+        ],
+        [
+            InlineKeyboardButton("❓ Помощь", callback_data="help"),
+        ],
+    ]
+    if OWNER_USER_ID and is_owner(OWNER_USER_ID):
+        keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(keyboard)
+
 # ============== ОСНОВНАЯ ЛОГИКА ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1065,7 +1219,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # --- Обработка вопроса о времени ---
+        # --- Обработка времени ---
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
                 tz = get_user_timezone(user_info['timezone'])
@@ -1110,6 +1264,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"❌ Недопустимое имя. Доступны: {', '.join(valid_tables)} или 'все'.",
                         parse_mode='Markdown'
                     )
+                return
+
+        # --- Поиск в GitHub (владелец) ---
+        if is_owner(user_id):
+            match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
+            if match:
+                query_text = match.group(1).strip()
+                if not query_text:
+                    await message.reply_text("📝 Напишите, что искать: луна искать в коде <текст>")
+                    return
+                status_msg = await message.reply_text(f"🔍 Ищу в коде: {query_text}...")
+                results = search_github_code(query_text)
+                if results is None:
+                    await status_msg.edit_text("❌ Ошибка поиска (проверьте GITHUB_TOKEN и интернет).")
+                    return
+                if not results:
+                    await status_msg.edit_text(f"❌ Ничего не найдено по запросу: {query_text}")
+                    return
+                lines = [f"📁 **Результаты поиска:** {query_text}\n"]
+                for idx, res in enumerate(results, 1):
+                    lines.append(f"{idx}. [{res['path']}]({res['url']})")
+                if len(lines) > 10:
+                    lines = lines[:10] + ["... (показаны первые 10)"]
+                await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
         # --- Вопросы о владельце ---
@@ -1400,40 +1578,6 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
         }
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
-
-# ============== МЕНЮ ==============
-def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
-        [
-            InlineKeyboardButton("🌤️ Погода", callback_data="weather"),
-            InlineKeyboardButton("🎨 Картинка", callback_data="imagine"),
-        ],
-        [
-            InlineKeyboardButton("🎬 YouTube", callback_data="yt"),
-            InlineKeyboardButton("📖 Википедия", callback_data="wiki"),
-        ],
-        [
-            InlineKeyboardButton("📊 Статистика", callback_data="stats"),
-            InlineKeyboardButton("🧹 Сброс", callback_data="reset"),
-        ],
-        [
-            InlineKeyboardButton("🇺🇿 Ташкент", switch_inline_query_current_chat="/setcity Ташкент"),
-            InlineKeyboardButton("🇷🇺 Москва", switch_inline_query_current_chat="/setcity Москва"),
-        ],
-        [
-            InlineKeyboardButton("🇷🇺 Санкт-Петербург", switch_inline_query_current_chat="/setcity Санкт-Петербург"),
-            InlineKeyboardButton("🇬🇧 Лондон", switch_inline_query_current_chat="/setcity Лондон"),
-        ],
-        [
-            InlineKeyboardButton("🇺🇸 Нью-Йорк", switch_inline_query_current_chat="/setcity Нью-Йорк"),
-            InlineKeyboardButton("✏️ Свой город", switch_inline_query_current_chat="/setcity "),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
-            InlineKeyboardButton("❓ Помощь", callback_data="help"),
-        ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
 
 # ============== ЗАПУСК ==============
 def main():
