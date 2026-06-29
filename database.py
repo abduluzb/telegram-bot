@@ -1,4 +1,4 @@
-# database.py - расширенная версия с историей пользователя
+# database.py - без таблицы user_interests
 
 import os
 import logging
@@ -6,7 +6,7 @@ import time
 import re
 from typing import List, Optional, Dict, Any
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Text, Float, 
+    create_engine, Column, Integer, String, Text, Float,
     DateTime, BigInteger, Boolean, ForeignKey, text
 )
 from sqlalchemy.ext.declarative import declarative_base
@@ -120,19 +120,6 @@ class Config(Base):
     key = Column(String(255), unique=True, index=True)
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-class UserInterest(Base):
-    __tablename__ = "user_interests"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, index=True)
-    topic = Column(String(100))
-    weight = Column(Float, default=1.0)
-    mentions = Column(Integer, default=1)
-    last_mentioned = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-# Удаляем таблицу response_ratings, так как кнопки оценок убраны
-# Если она уже есть в БД, её можно удалить вручную, но мы просто не создаём.
 
 Base.metadata.create_all(bind=engine)
 
@@ -326,7 +313,6 @@ def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
         )
         session.add(memory)
         session.commit()
-        # Ограничение 100 записей на пользователя
         count = session.query(ChatMemory).filter_by(user_id=user_id).count()
         if count > 100:
             oldest = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.asc()).first()
@@ -348,7 +334,6 @@ def get_chat_memory(chat_id, limit=10):
         session.close()
 
 def get_user_history(user_id, limit=30):
-    """Возвращает последние сообщения пользователя (из всех чатов)."""
     session = get_session()
     try:
         records = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.desc()).limit(limit).all()
@@ -480,78 +465,6 @@ def delete_note(note_id):
     finally:
         session.close()
 
-# ============== ИНТЕРЕСЫ ПОЛЬЗОВАТЕЛЯ ==============
-
-STOP_WORDS = {
-    "и", "в", "на", "с", "по", "к", "у", "за", "из", "от", "до", "о", "об",
-    "для", "без", "как", "что", "это", "этот", "весь", "все", "всё", "мой",
-    "твой", "его", "её", "их", "наш", "ваш", "кто", "что", "где", "когда",
-    "почему", "как", "какой", "сколько", "зачем", "а", "но", "и", "или",
-    "если", "то", "чтобы", "так", "же", "бы", "да", "нет", "уже", "ещё",
-    "очень", "слишком", "также", "тоже", "потому", "поэтому", "ведь",
-    "вот", "вон", "ли", "уж", "же", "вдруг", "раз", "два", "три", "четыре",
-    "пять", "десять", "сто", "тысяча", "миллион"
-}
-
-def extract_topics(text: str) -> List[str]:
-    if not text:
-        return []
-    text_lower = text.lower()
-    words = re.findall(r'\b[a-zа-яё0-9]{3,}\b', text_lower)
-    topics = [w for w in words if w not in STOP_WORDS and len(w) > 2]
-    bigrams = []
-    for i in range(len(words)-1):
-        bg = words[i] + " " + words[i+1]
-        if len(bg) > 3 and bg not in STOP_WORDS:
-            bigrams.append(bg)
-    all_topics = topics + bigrams
-    return list(set([t for t in all_topics if len(t) < 30]))
-
-@retry_on_disconnect
-def update_user_interests(user_id: int, text: str):
-    topics = extract_topics(text)
-    if not topics:
-        return
-    session = get_session()
-    try:
-        existing = {t.topic: t for t in session.query(UserInterest).filter_by(user_id=user_id).all()}
-        for topic in topics:
-            if topic in existing:
-                interest = existing[topic]
-                interest.mentions += 1
-                interest.weight += 0.5
-                interest.last_mentioned = datetime.utcnow()
-            else:
-                interest = UserInterest(
-                    user_id=user_id,
-                    topic=topic,
-                    weight=1.0,
-                    mentions=1,
-                    last_mentioned=datetime.utcnow()
-                )
-                session.add(interest)
-        all_interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).all()
-        if len(all_interests) > 20:
-            for interest in all_interests[20:]:
-                session.delete(interest)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Ошибка update_user_interests: {e}")
-    finally:
-        session.close()
-
-def get_user_interests(user_id: int, limit: int = 5) -> List[str]:
-    session = get_session()
-    try:
-        interests = session.query(UserInterest).filter_by(user_id=user_id).order_by(UserInterest.weight.desc()).limit(limit).all()
-        return [i.topic for i in interests]
-    except Exception as e:
-        logger.error(f"Ошибка get_user_interests: {e}")
-        return []
-    finally:
-        session.close()
-
 # ============== ОЧИСТКА ТАБЛИЦ ==============
 
 @retry_on_disconnect
@@ -566,7 +479,6 @@ def clear_table(table_name: str) -> bool:
             "reminders": Reminder,
             "notes": Note,
             "config": Config,
-            "user_interests": UserInterest,
         }
         if table_name not in valid:
             logger.warning(f"Попытка очистить недопустимую таблицу: {table_name}")

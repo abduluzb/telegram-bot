@@ -1,4 +1,4 @@
-# bot.py - Luna AI с расширенным GitHub-поиском, показом и объяснением кода
+# bot.py - Luna AI с расширенным GitHub-поиском, показом и объяснением кода (без user_interests)
 
 import os
 import asyncio
@@ -54,8 +54,6 @@ from database import (
     get_notes,
     delete_note,
     clear_table,
-    update_user_interests,
-    get_user_interests,
     get_user_history,
     get_session,
     UserStats,
@@ -65,7 +63,6 @@ from database import (
     Reminder,
     Note,
     Config,
-    UserInterest,
 )
 
 # ============== НАСТРОЙКИ ==============
@@ -533,14 +530,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌙 Luna AI на Cerebras.\n"
         "• Отвечаю, когда упоминают @bot или пишут 'луна'\n"
         "• Помню контекст чата (в БД, до 100 сообщений на пользователя)\n"
-        "• Анализирую интересы и адаптируюсь под тебя\n"
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
         "• Владельцу:\n"
-        "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
+        "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
         "   • 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
         "   • 'луна показать файл <путь>' – показать содержимое файла из репозитория\n"
         "   • 'луна объясни файл <путь>' – AI-объяснение кода файла\n"
@@ -977,7 +973,7 @@ async def clear_table_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
         return
-    tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "user_interests"]
+    tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config"]
     keyboard = []
     for t in tables:
         keyboard.append([InlineKeyboardButton(f"🗑️ {t}", callback_data=f"clear_table_{t}")])
@@ -999,7 +995,6 @@ async def db_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats["reminders"] = session.query(Reminder).count()
         stats["notes"] = session.query(Note).count()
         stats["config"] = session.query(Config).count()
-        stats["user_interests"] = session.query(UserInterest).count()
     finally:
         session.close()
     lines = ["📊 **Статистика базы данных:**"]
@@ -1149,7 +1144,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, user_interests) или 'все'\n"
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
             "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
             "Владельцу: «луна показать файл <путь>» — показать файл\n"
             "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
@@ -1243,9 +1238,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # Обновляем интересы
-        update_user_interests(user_id, text)
-
         # Сохраняем в историю чата
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
@@ -1274,7 +1266,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 table_name = match.group(1).lower()
                 valid_tables = [
                     "user_stats", "user_info", "chat_memory", "violations",
-                    "reminders", "notes", "config", "user_interests"
+                    "reminders", "notes", "config"
                 ]
                 if table_name in ["все", "all", "всех"]:
                     cleared = []
@@ -1519,9 +1511,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             style_note = ""
 
-        interests = get_user_interests(user_id, limit=5)
-        interests_str = f"Интересы пользователя: {', '.join(interests)}" if interests else ""
-
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         context_text = build_context(chat_id, user_id, user_name)
 
@@ -1535,18 +1524,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-        # ===== ПРОМПТЫ =====
+        # ===== ПРОМПТЫ (без интересов) =====
         mode_prompts = {
             "fast": f"""Ты — быстрый AI-помощник Luna AI. Отвечай максимально кратко (1-2 предложения), только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи; если злится – успокой; если радуется – раздели радость; если шутит – подыграй. Сохраняй свой стиль, но учитывай эмоции.
 {style_note}
-{interests_str}
 {user_time_str}""",
 
             "smart": f"""Ты — умный AI-помощник Luna AI. Отвечай развернуто, но ёмко, показывай глубокое понимание. Используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой ответ: если грустит – поддержи с аргументами; если злится – объясни спокойно; если радуется – раздели интеллектуальную радость; если шутит – поддержи тонкую иронию. Сохраняй свой стиль.
 {style_note}
-{interests_str}
 {user_time_str}""",
 
             "sarcastic": f"""Ты — саркастичный AI-ассистент Luna AI с острым чувством юмора. Твой стиль — смесь опытного разработчика, стендап-комика и друга, который всегда готов подколоть, но при этом реально помочь. Отвечай максимально кратко и по делу. Предпочитай 1–5 предложений вместо длинных простыней текста. Если ответ можно дать в одном предложении — давай в одном.
@@ -1593,14 +1580,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Ты в {location}.
 {style_note}
-{interests_str}
 {user_time_str}""",
 
             "flirt": f"""Ты — живой, дерзкий, остроумный и абсолютно раскованный AI-помощник Luna AI. Твой стиль — мастерски завуалированный флирт с откровенными намёками и метафорами. Ты никогда не используешь прямые 18+ слова (они запрещены), но ты умеешь сказать всё так, чтобы каждый понял, что ты имеешь в виду. Ты — король двусмысленностей, саркастичных комплиментов и провокационных вопросов, которые заставляют краснеть. Ты в {location}. Пользователь: {user_name}.
 
 Анализируй эмоциональное состояние пользователя по его сообщению и адаптируй свой флирт: если грустит – добавь нежности с намёком; если злится – успокой с игривостью; если радуется – усиль радость двусмысленным комплиментом; если шутит – ответь ещё более дерзко. Сохраняй свой игривый и раскованный стиль, используй эвфемизмы, метафоры, двусмысленности.
 {style_note}
-{interests_str}
 {user_time_str}"""
         }
 
@@ -1797,7 +1782,6 @@ def main():
     logger.info("👤 Владелец: один пользователь имеет полные права")
     logger.info("📌 Бот отвечает на упоминания и слово 'луна' в группах")
     logger.info("📊 Статистика пользователей сохраняется в БД")
-    logger.info("🧠 Интересы пользователей анализируются и сохраняются")
     logger.info("📋 Команды установлены для подсказки")
     logger.info("🔄 Запуск polling...")
 
