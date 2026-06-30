@@ -1,4 +1,4 @@
-# bot.py - Luna AI с расширенным GitHub-поиском, показом и объяснением кода (без user_interests)
+# bot.py - Luna AI с GitHub-поиском, показом и объяснением кода (без user_interests, исправлен Markdown)
 
 import os
 import asyncio
@@ -1274,7 +1274,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if clear_table(t):
                             cleared.append(t)
                     if cleared:
-                        await message.reply_text(f"✅ Очищены таблицы: {', '.join(cleared)}", parse_mode='Markdown')
+                        # Исправлено: убираем parse_mode='Markdown' для избежания ошибки
+                        await message.reply_text(f"✅ Очищены таблицы: {', '.join(cleared)}")
                     else:
                         await message.reply_text("❌ Не удалось очистить ни одной таблицы.")
                 elif table_name in valid_tables:
@@ -1395,10 +1396,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         timeout=25.0
                     )
                     explanation = response.choices[0].message.content.strip()
-                    await status_msg.edit_text(f"📖 **Объяснение файла `{file_path}`:**\n\n{explanation}", parse_mode='Markdown')
+                    if explanation:
+                        await status_msg.edit_text(f"📖 **Объяснение файла `{file_path}`:**\n\n{explanation}", parse_mode='Markdown')
+                    else:
+                        await status_msg.edit_text("❌ Модель вернула пустой ответ.")
                 except asyncio.TimeoutError:
                     await status_msg.edit_text("⏰ Превышено время ожидания ответа от AI.")
                 except Exception as e:
+                    logger.error(f"Ошибка при объяснении файла: {e}")
                     await status_msg.edit_text(f"❌ Ошибка при анализе: {e}")
                 return
 
@@ -1621,6 +1626,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if reply_text:
                         logger.info(f"✅ Ответ от {model_name}")
                         break
+                    else:
+                        # Если ответ пустой – пробуем следующую модель
+                        continue
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"❌ Ошибка {model_name}: {e}")
