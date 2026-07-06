@@ -1,4 +1,4 @@
-# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени
+# bot.py - Luna AI с улучшенным распознаванием команд, запоминанием имени и проверкой ответов
 
 import os
 import asyncio
@@ -511,7 +511,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         language_code=user.language_code
     )
     custom_name = user_info.get('custom_name') if user_info else None
-    greeting = f"🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
+    greeting = "🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
     if custom_name:
         greeting += f"Рада снова видеть тебя, {custom_name}! "
     else:
@@ -543,7 +543,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
-        "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
+        "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>' или 'меня зовут <имя>'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
         "• Владельцу:\n"
         "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
@@ -964,7 +964,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== АДМИН-ПАНЕЛЬ (только владелец) ==============
+# ============== АДМИН-ПАНЕЛЬ ==============
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_owner(update.effective_user.id):
@@ -1061,7 +1061,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
         return
 
-    # Старые callback
     if data.startswith("approve_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -1212,8 +1211,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
-# ============== ОБНОВЛЁННАЯ ОБРАБОТКА КОМАНД ==============
-
+# ============== ОСНОВНАЯ ЛОГИКА ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         message = update.effective_message
@@ -1233,11 +1231,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # Модерация
         if await apply_moderation(update, context):
             return
 
-        # Сохраняем информацию о пользователе
         user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -1246,15 +1242,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             language_code=user.language_code
         )
 
-        # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # Сохраняем в историю чата (только для статистики, не для контекста других пользователей)
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
         # ===== 1. ОБРАБОТКА КОМАНДЫ "ЗАПОМНИ ИМЯ" (гибкое распознавание) =====
-        # Проверяем разные варианты
         is_name_command = False
         custom_name = None
 
@@ -1295,7 +1288,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ===== 2. ОБРАБОТКА ЗАМЕТОК "луна запомни ..." (не имя) =====
-        # Проверяем, что это не команда имени (она уже обработана)
         if re.search(r'^луна\s+запомни\s+', text_lower) and not is_name_command:
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -1307,7 +1299,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # ===== 3. ОБРАБОТКА ВРЕМЕНИ (как было) =====
+        # ===== 3. ОБРАБОТКА ВРЕМЕНИ =====
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
                 tz = get_user_timezone(user_info['timezone'])
@@ -1325,134 +1317,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ===== 4. ОБРАБОТКА ОСТАЛЬНЫХ КОМАНД (очистка таблиц, GitHub, показ файлов, вопросы о владельце) =====
-        # (всё без изменений, как в предыдущей версии)
-        # ...
-
-        # ===== 5. ОСНОВНОЙ AI ОТВЕТ (с проверкой на пустой/странный ответ) =====
-        # (весь код до получения reply_text остаётся без изменений)
-
-        thinking_msg = await message.reply_text("⚡ Думаю...")
-        reply_text = None
-        last_error = None
-        temperature = 1.0 if global_mode == "flirt" else 0.8
-
-        for model_name in MODELS:
-            try:
-                response = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: client.chat.completions.create(
-                            model=model_name,
-                            messages=messages,
-                            max_tokens=600,
-                            temperature=temperature
-                        )
-                    ),
-                    timeout=15.0
-                )
-                if response.choices and response.choices[0].message.content:
-                    reply_text = response.choices[0].message.content.strip()
-                    if reply_text and len(reply_text) > 2:  # проверяем, что ответ не пустой и не слишком короткий
-                        logger.info(f"✅ Ответ от {model_name}")
-                        break
-                    else:
-                        logger.warning(f"Пустой или слишком короткий ответ от {model_name}")
-                        continue
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(f"❌ Ошибка {model_name}: {e}")
-                await asyncio.sleep(1)
-
-        if not reply_text or len(reply_text) < 3:
-            # Запасной ответ, если AI ничего не дал
-            reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
-            logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
-
-        add_to_user_memory(user_id, reply_text, "assistant")
-        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
-
-        if len(reply_text) > 4000:
-            for i in range(0, len(reply_text), 4000):
-                await thinking_msg.edit_text(reply_text[i:i+4000])
-                if i + 4000 < len(reply_text):
-                    thinking_msg = await message.reply_text("📄 Продолжение...")
-        else:
-            await thinking_msg.edit_text(reply_text)
-
-    except Exception as e:
-        logger.error(f"Ошибка в handle_message: {e}")
-        try:
-            await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз.")
-        except:
-            pass    try:
-        message = update.effective_message
-        user_id = update.effective_user.id
-        chat_id = update.effective_chat.id
-        chat_type = update.effective_chat.type
-        bot_username = context.bot.username
-        user_name = update.effective_user.first_name or "Пользователь"
-        user = update.effective_user
-
-        if not message.text:
-            return
-        if user_id == context.bot.id:
-            return
-
-        text = message.text.strip()
-        text_lower = text.lower()
-        logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
-
-        # Модерация
-        if await apply_moderation(update, context):
-            return
-
-        # Сохраняем информацию о пользователе
-        user_info = get_or_create_user_info(
-            user_id=user_id,
-            username=user.username,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            language_code=user.language_code
-        )
-
-        # Обновляем статистику
-        update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
-
-        # Сохраняем в историю чата (только для статистики, не для контекста)
-        add_chat_memory(chat_id, user_id, user_name, text, role="user")
-        add_chat_member(chat_id, user_id, user_name)
-
-        # --- Обработка команды "луна запомни моё имя" ---
-        match_name = re.search(r'^луна\s+запомни\s+моё\s+имя\s+(.+)', text_lower)
-        if match_name:
-            new_name = match_name.group(1).strip()
-            if new_name:
-                if update_user_custom_name(user_id, new_name):
-                    await message.reply_text(f"✅ Запомнила! Теперь я буду называть тебя {new_name}.")
-                else:
-                    await message.reply_text("❌ Не удалось сохранить имя.")
-            else:
-                await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
-            return
-
-        # --- Обработка времени ---
-        if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
-            if user_info and user_info.get('timezone'):
-                tz = get_user_timezone(user_info['timezone'])
-                if tz:
-                    try:
-                        now = datetime.now(tz)
-                        await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
-                    except Exception as e:
-                        logger.error(f"Ошибка времени: {e}")
-                        await message.reply_text(f"⚠️ Не удалось определить время для '{user_info['timezone']}'.")
-                else:
-                    await message.reply_text(f"⚠️ Таймзона '{user_info['timezone']}' не распознана.")
-            else:
-                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
-            return
-
-        # --- Очистка таблиц (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -1479,7 +1343,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-        # --- GitHub поиск (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
@@ -1503,7 +1366,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
-        # --- Показать файл (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
             if match:
@@ -1534,7 +1396,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
                 return
 
-        # --- Объяснить файл (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
             if match:
@@ -1581,7 +1442,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"❌ Ошибка при анализе: {e}")
                 return
 
-        # --- Вопросы о владельце ---
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -1594,7 +1454,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # --- Внешность владельца ---
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -1614,19 +1473,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # --- Заметки "луна запомни" ---
-        if re.search(r'^луна\s+запомни\s+', text_lower) and not re.search(r'моё\s+имя', text_lower):
-            note_text = text[text.find('запомни')+7:].strip()
-            if note_text:
-                if add_note(user_id, note_text):
-                    await message.reply_text("✅ Запомнила!")
-                else:
-                    await message.reply_text("❌ Не удалось сохранить заметку.")
-            else:
-                await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
-            return
-
-        # --- Определяем, нужно ли отвечать ---
+        # ===== 5. ОСНОВНОЙ AI ОТВЕТ =====
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1661,13 +1508,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # --- Википедия ---
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # --- Лимит спама ---
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1676,7 +1521,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # --- Подготовка к AI ---
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1704,7 +1548,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-        # ===== ПРОМПТЫ (улучшенный сарказм) =====
         mode_prompts = {
             "fast": f"""Ты — Луна, быстрый AI-помощник. Отвечай кратко, только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя и адаптируй ответ.
@@ -1764,20 +1607,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 if response.choices and response.choices[0].message.content:
                     reply_text = response.choices[0].message.content.strip()
-                    if reply_text:
+                    if reply_text and len(reply_text) > 2:
                         logger.info(f"✅ Ответ от {model_name}")
                         break
+                    else:
+                        logger.warning(f"Пустой или слишком короткий ответ от {model_name}")
+                        continue
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"❌ Ошибка {model_name}: {e}")
                 await asyncio.sleep(1)
 
-        if not reply_text:
-            reply_text = "Не удалось получить ответ. Попробуй ещё раз."
-            logger.error(f"❌ Все модели не отвечают: {last_error}")
+        if not reply_text or len(reply_text) < 3:
+            reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
+            logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
 
         add_to_user_memory(user_id, reply_text, "assistant")
-        # Сохраняем ответ в историю (для статистики, но не для контекста других пользователей)
         add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
 
         if len(reply_text) > 4000:
