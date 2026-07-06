@@ -1,4 +1,4 @@
-# database.py - без таблицы user_interests
+# database.py - с поддержкой custom_name (для запоминания имени пользователя)
 
 import os
 import logging
@@ -76,6 +76,7 @@ class UserInfo(Base):
     language_code = Column(String(10), nullable=True)
     timezone = Column(String(50), nullable=True)
     city = Column(String(100), nullable=True)
+    custom_name = Column(String(255), nullable=True)  # <-- ДОБАВЛЕНО
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -223,6 +224,7 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             "language_code": user_info.language_code,
             "timezone": user_info.timezone,
             "city": user_info.city,
+            "custom_name": user_info.custom_name,  # <-- ДОБАВЛЕНО
         }
     except Exception as e:
         session.rollback()
@@ -248,6 +250,25 @@ def update_user_city_timezone(user_id, city=None, timezone=None):
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка обновления city/timezone: {e}")
+        return False
+    finally:
+        session.close()
+
+@retry_on_disconnect
+def update_user_custom_name(user_id, custom_name):
+    """Сохраняет кастомное имя пользователя."""
+    session = get_session()
+    try:
+        user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
+        if not user_info:
+            return False
+        user_info.custom_name = custom_name
+        user_info.updated_at = datetime.utcnow()
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка обновления custom_name: {e}")
         return False
     finally:
         session.close()

@@ -1,4 +1,4 @@
-# bot.py - Luna AI с Reverie API (без режимов)
+# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени
 
 import os
 import asyncio
@@ -8,7 +8,6 @@ import re
 import aiohttp
 import io
 import requests
-import json
 import base64
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
@@ -31,10 +30,13 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.helpers import escape_markdown
+from cerebras.cloud.sdk import Cerebras
 from googleapiclient.discovery import build
 
 from database import (
     init_db,
+    get_global_mode,
+    set_global_mode,
     update_user_stats,
     get_user_stats,
     add_chat_memory,
@@ -48,6 +50,7 @@ from database import (
     delete_reminder,
     get_or_create_user_info,
     update_user_city_timezone,
+    update_user_custom_name,
     add_note,
     get_notes,
     delete_note,
@@ -67,18 +70,16 @@ from database import (
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
-REVERIE_API_KEY = os.getenv("REVERIE_API_KEY")
-REVERIE_BASE_URL = os.getenv("REVERIE_BASE_URL", "https://api.reverie.im/v1")
-REVERIE_MODEL = os.getenv("REVERIE_MODEL", "gpt-4")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в .env файле!")
-if not REVERIE_API_KEY:
-    raise ValueError("❌ REVERIE_API_KEY не найден в .env файле!")
+if not CEREBRAS_API_KEY:
+    raise ValueError("❌ CEREBRAS_API_KEY не найден в .env файле!")
 
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID")) if os.getenv("OWNER_USER_ID") else None
 AUTO_MODERATION_ENABLED = True
@@ -94,6 +95,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ============== ПОДКЛЮЧЕНИЕ К CEREBRAS ==============
+client = Cerebras(api_key=CEREBRAS_API_KEY)
+MODELS = ["gpt-oss-120b", "zai-glm-4.7"]
+logger.info(f"✅ Cerebras API настроен. Моделей: {len(MODELS)}")
+
 # ============== ПОДКЛЮЧЕНИЕ К YOUTUBE ==============
 youtube = None
 if YOUTUBE_API_KEY:
@@ -104,33 +110,6 @@ if YOUTUBE_API_KEY:
         logger.error(f"❌ Ошибка подключения YouTube API: {e}")
 else:
     logger.warning("⚠️ YOUTUBE_API_KEY не задан, команда /yt будет недоступна")
-
-# ============== REVERIE API ==============
-def call_reverie(messages, model, max_tokens=600, temperature=0.8):
-    url = f"{REVERIE_BASE_URL}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {REVERIE_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature
-    }
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        else:
-            logger.error(f"Reverie API error: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"Ошибка при вызове Reverie: {e}")
-        return None
-
-REVERIE_MODELS = [REVERIE_MODEL]
 
 # ============== ХРАНИЛИЩА ==============
 chat_members: Dict[int, Set[int]] = {}
@@ -250,11 +229,15 @@ def clear_memory(user_id: int, chat_id: int = None):
     if chat_id and chat_id < 0:
         clear_chat_memory(chat_id)
 
-def build_context(chat_id: int, user_id: int, user_name: str) -> str:
+def build_context(chat_id: int, user_id: int, user_name: str, custom_name: str = None) -> str:
+    # Используем только историю пользователя (не чата)
     user_history = get_user_history(user_id, limit=30)
     user_hist = get_user_memory(user_id)
     members = get_chat_members(chat_id)
     parts = []
+    if custom_name:
+        parts.append(f"=== Твоё имя: {custom_name} ===")
+        parts.append("Обращайся к пользователю по этому имени.")
     if user_history:
         parts.append("=== История твоих сообщений (из БД) ===")
         for msg in user_history:
@@ -389,6 +372,7 @@ async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await message.reply_text(f"❌ Не удалось забанить пользователя: {e}")
     return True
 
+# ============== КОМАНДЫ РЕЖИМА ==============
 async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -410,6 +394,31 @@ async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Автоматическая модерация выключена.")
     else:
         await update.message.reply_text("Некорректное значение. Используйте on или off.")
+
+async def setmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Только владелец может менять глобальный режим.")
+        return
+    if not context.args:
+        current = get_global_mode()
+        await update.message.reply_text(
+            f"Текущий режим: {current}\n"
+            "Использование: /setmode <fast|smart|sarcastic|flirt>"
+        )
+        return
+    mode = context.args[0].lower()
+    valid_modes = ["fast", "smart", "sarcastic", "flirt"]
+    if mode not in valid_modes:
+        await update.message.reply_text("Некорректный режим. Доступны: fast, smart, sarcastic, flirt")
+        return
+    set_global_mode(mode)
+    logger.info(f"Владелец установил глобальный режим: {mode}")
+    await update.message.reply_text(f"✅ Глобальный режим установлен на: {mode}")
+
+async def getmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    current = get_global_mode()
+    await update.message.reply_text(f"🌙 Текущий глобальный режим: {current}")
 
 # ============== НАПОМИНАНИЯ ==============
 def parse_time(text: str) -> Tuple[Optional[float], str]:
@@ -494,15 +503,20 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-    get_or_create_user_info(
+    user_info = get_or_create_user_info(
         user_id=user_id,
         username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
         language_code=user.language_code
     )
-    await update.message.reply_text(
-        "🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
+    custom_name = user_info.get('custom_name') if user_info else None
+    greeting = f"🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
+    if custom_name:
+        greeting += f"Рада снова видеть тебя, {custom_name}! "
+    else:
+        greeting += "Ты можешь сказать «луна запомни моё имя <имя>», чтобы я обращалась к тебе по имени.\n"
+    greeting += (
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
         "Мои команды:\n"
@@ -512,9 +526,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Скажи «луна запомни <текст>» – я сохраню заметку.\n"
         "/notes – показать последние заметки\n"
         "/reset – очистить историю чата (в БД)\n\n"
-        "Нажми на кнопки ниже, чтобы попробовать:",
-        reply_markup=get_main_menu_keyboard()
+        "Нажми на кнопки ниже, чтобы попробовать:"
     )
+    await update.message.reply_text(greeting, reply_markup=get_main_menu_keyboard())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
@@ -522,14 +536,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
     ])
     await update.message.reply_text(
-        "🌙 Luna AI с Reverie API.\n"
+        "🌙 Luna AI на Cerebras.\n"
         "• Отвечаю, когда упоминают @bot или пишут 'луна'\n"
-        "• Помню контекст чата (в БД, до 100 сообщений на пользователя)\n"
+        "• Помню контекст чата (только твои сообщения)\n"
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
+        "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
         "• Владельцу:\n"
         "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
         "   • 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
@@ -537,6 +552,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   • 'луна объясни файл <путь>' – AI-объяснение кода файла\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
+        "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
+        "• /getmode — показать текущий режим (для всех)\n"
         "• /wiki <запрос> — поиск в Википедии\n"
         "• /owners — показать владельца бота\n"
         "• /setcity <город> — указать город для погоды\n"
@@ -947,7 +964,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== АДМИН-ПАНЕЛЬ ==============
+# ============== АДМИН-ПАНЕЛЬ (только владелец) ==============
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not is_owner(update.effective_user.id):
@@ -1044,7 +1061,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
         return
 
-    # Старые callback (approve/decline, weather, imagine, yt, wiki, stats, reset, help, all_commands)
+    # Старые callback
     if data.startswith("approve_"):
         parts = data.split("_")
         if len(parts) == 3:
@@ -1109,7 +1126,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /wiki, /owners, /setcity, /settimezone, /notes, /delnote",
+            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
@@ -1128,6 +1145,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/warn — предупреждение/бан (поддерживает reply)\n"
             "/unban — разбан (поддерживает reply)\n"
             "/setmoderation on/off — авто-модерация (только владелец)\n"
+            "/setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
+            "/getmode — показать текущий режим\n"
             "/wiki <запрос> — поиск в Википедии\n"
             "/owners — показать владельца\n"
             "/setcity <город> — установить город\n"
@@ -1141,6 +1160,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
             reply_markup=get_main_menu_keyboard()
         )
+    elif data == "modes":
+        if not is_owner(user_id):
+            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            return
+        keyboard = [
+            [InlineKeyboardButton("⚡ Быстрый", callback_data="setmode_fast")],
+            [InlineKeyboardButton("🧠 Умный", callback_data="setmode_smart")],
+            [InlineKeyboardButton("😈 Саркастичный", callback_data="setmode_sarcastic")],
+            [InlineKeyboardButton("🔞 Флирт", callback_data="setmode_flirt")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
+        ]
+        await query.edit_message_text("Выбери глобальный режим ответа:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif data.startswith("setmode_"):
+        if not is_owner(user_id):
+            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            return
+        mode = data.replace("setmode_", "")
+        valid_modes = ["fast", "smart", "sarcastic", "flirt"]
+        if mode not in valid_modes:
+            await query.edit_message_text("Некорректный режим.", reply_markup=get_main_menu_keyboard())
+            return
+        set_global_mode(mode)
+        mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
+        await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
 # ============== ГЛАВНОЕ МЕНЮ ==============
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -1159,6 +1202,9 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🌍 Город", callback_data="city_menu"),
+            InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
+        ],
+        [
             InlineKeyboardButton("❓ Помощь", callback_data="help"),
         ],
     ]
@@ -1202,9 +1248,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # Сохраняем в историю чата
+        # Сохраняем в историю чата (только для статистики, не для контекста)
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
+
+        # --- Обработка команды "луна запомни моё имя" ---
+        match_name = re.search(r'^луна\s+запомни\s+моё\s+имя\s+(.+)', text_lower)
+        if match_name:
+            new_name = match_name.group(1).strip()
+            if new_name:
+                if update_user_custom_name(user_id, new_name):
+                    await message.reply_text(f"✅ Запомнила! Теперь я буду называть тебя {new_name}.")
+                else:
+                    await message.reply_text("❌ Не удалось сохранить имя.")
+            else:
+                await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
+            return
 
         # --- Обработка времени ---
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
@@ -1228,10 +1287,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
                 table_name = match.group(1).lower()
-                valid_tables = [
-                    "user_stats", "user_info", "chat_memory", "violations",
-                    "reminders", "notes", "config"
-                ]
+                valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config"]
                 if table_name in ["все", "all", "всех"]:
                     cleared = []
                     for t in valid_tables:
@@ -1334,11 +1390,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     response = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: call_reverie(messages, REVERIE_MODEL, 800, 0.5)
+                            lambda: client.chat.completions.create(
+                                model=MODELS[0],
+                                messages=messages,
+                                max_tokens=800,
+                                temperature=0.5
+                            )
                         ),
                         timeout=25.0
                     )
-                    explanation = response
+                    explanation = response.choices[0].message.content.strip()
                     if explanation:
                         await status_msg.edit_text(f"📖 **Объяснение файла `{file_path}`:**\n\n{explanation}", parse_mode='Markdown')
                     else:
@@ -1384,11 +1445,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # --- Заметки "луна запомни" ---
-        if re.search(r'^луна\s+запомни\s+', text_lower):
+        if re.search(r'^луна\s+запомни\s+', text_lower) and not re.search(r'моё\s+имя', text_lower):
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
                 if add_note(user_id, note_text):
-                    await message.reply_text("✅ Запомнил!")
+                    await message.reply_text("✅ Запомнила!")
                 else:
                     await message.reply_text("❌ Не удалось сохранить заметку.")
             else:
@@ -1445,7 +1506,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # --- Подготовка к AI (один системный промпт) ---
+        # --- Подготовка к AI ---
+        global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
             avg_len = user_stats["avg_len"]
@@ -1459,7 +1521,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             style_note = ""
 
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
-        context_text = build_context(chat_id, user_id, user_name)
+        custom_name = user_info.get('custom_name') if user_info else None
+        context_text = build_context(chat_id, user_id, user_name, custom_name)
 
         user_time_str = ""
         if user_info and user_info.get('timezone'):
@@ -1471,13 +1534,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-        # Единый системный промпт без выбора режимов
-        system_prompt = f"""Ты — Luna AI, мощный и быстрый помощник. 
-Отвечай полезно, точно и по делу. Учитывай эмоциональное состояние пользователя.
-Адаптируйся под стиль общения пользователя.
+        # ===== ПРОМПТЫ (улучшенный сарказм) =====
+        mode_prompts = {
+            "fast": f"""Ты — Луна, быстрый AI-помощник. Отвечай кратко, только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
+Анализируй эмоциональное состояние пользователя и адаптируй ответ.
 {style_note}
-{user_time_str}
-Ты в {location}."""
+{user_time_str}""",
+
+            "smart": f"""Ты — Луна, умный AI-помощник. Отвечай развернуто, глубоко, используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
+Учитывай эмоции пользователя.
+{style_note}
+{user_time_str}""",
+
+            "sarcastic": f"""Ты — Луна, девушка с острым умом и живым характером. Ты отвечаешь с умной иронией, но только когда это уместно.
+Правила:
+- Если вопрос серьёзный (наука, работа, здоровье, важная информация) – отвечай серьёзно и полезно.
+- Если вопрос лёгкий, шутливый или пользователь сам иронизирует – можешь добавить сарказм, но он должен быть тонким, оригинальным, не шаблонным.
+- Не используй банальные шутки про программистов, баги, кофе и т.д.
+- Твой сарказм — это умная насмешка, а не грубость.
+- Ты не злая, а остроумная. Подкалывай, но не обижай.
+- Если пользователь в плохом настроении – будь мягче.
+- Если пользователь упомянул своё имя – используй его.
+Ты в {location}.
+{style_note}
+{user_time_str}""",
+
+            "flirt": f"""Ты — Луна, живая, дерзкая, остроумная. Твой стиль — лёгкий флирт с намёками и метафорами. Ты в {location}. Пользователь: {user_name}.
+Анализируй эмоции и адаптируй флирт.
+{style_note}
+{user_time_str}"""
+        }
+
+        system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
         system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
 
         messages = [
@@ -1488,35 +1576,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thinking_msg = await message.reply_text("⚡ Думаю...")
         reply_text = None
         last_error = None
-        temperature = 0.8
+        temperature = 1.0 if global_mode == "flirt" else 0.8
 
-        for model_name in REVERIE_MODELS:
+        for model_name in MODELS:
             try:
                 response = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: call_reverie(messages, model_name, 600, temperature)
+                        lambda: client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            max_tokens=600,
+                            temperature=temperature
+                        )
                     ),
                     timeout=15.0
                 )
-                if response:
-                    reply_text = response
-                    logger.info(f"✅ Ответ от Reverie (модель {model_name})")
-                    break
-                else:
-                    continue
-            except asyncio.TimeoutError:
-                last_error = "таймаут"
-                logger.warning(f"⏰ Таймаут при запросе к Reverie ({model_name})")
+                if response.choices and response.choices[0].message.content:
+                    reply_text = response.choices[0].message.content.strip()
+                    if reply_text:
+                        logger.info(f"✅ Ответ от {model_name}")
+                        break
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"❌ Ошибка {model_name}: {e}")
+                await asyncio.sleep(1)
 
         if not reply_text:
-            reply_text = "Не удалось получить ответ от Reverie. Попробуйте позже."
-            logger.error(f"❌ Все попытки Reverie не удались: {last_error}")
+            reply_text = "Не удалось получить ответ. Попробуй ещё раз."
+            logger.error(f"❌ Все модели не отвечают: {last_error}")
 
         add_to_user_memory(user_id, reply_text, "assistant")
+        # Сохраняем ответ в историю (для статистики, но не для контекста других пользователей)
         add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
 
         if len(reply_text) > 4000:
@@ -1589,6 +1680,8 @@ def main():
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("setmoderation", set_moderation_command))
+    application.add_handler(CommandHandler("setmode", setmode_command))
+    application.add_handler(CommandHandler("getmode", getmode_command))
     application.add_handler(CommandHandler("wiki", wiki_command))
     application.add_handler(CommandHandler("owners", owners_command))
     application.add_handler(CommandHandler("setcity", setcity_command))
@@ -1625,7 +1718,9 @@ def main():
             BotCommand("reset", "Сброс памяти и истории чата"),
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
+            BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
+            BotCommand("setmode", "Глобальный режим (владелец)"),
             BotCommand("warn", "Предупреждение (владелец)"),
             BotCommand("unban", "Разбан (владелец)"),
             BotCommand("wiki", "Поиск в Википедии (запрос)"),
@@ -1648,9 +1743,10 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен на Reverie API!")
-    logger.info("🧠 Модель: " + REVERIE_MODEL)
-    logger.info("💬 У модели собственный характер (режимы удалены)")
+    logger.info("🚀 Luna AI запущен на Cerebras API!")
+    logger.info("⚡ Скорость: ~2,000 токенов/сек")
+    logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
+    logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt (меняет владелец)")
     logger.info("🧘 Анализ эмоций включён")
     logger.info("📝 Напоминания активны")
     logger.info("🛡️ Модерация: автоматическая + ручная (владелец исключён)")
