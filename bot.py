@@ -1,4 +1,4 @@
-# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени и рассылкой при деплое
+# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени и ручной рассылкой (команда /broadcast)
 
 import os
 import asyncio
@@ -75,10 +75,6 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
-
-# Переменные для рассылки
-SEND_DEPLOY_NOTIFICATION = os.getenv("SEND_DEPLOY_NOTIFICATION", "True").lower() == "true"
-DEPLOY_MESSAGE = os.getenv("DEPLOY_MESSAGE", "🌙 Привет! Я обновилась! ✨\nТеперь я умею:\n• Запоминать твоё имя\n• Отвечать с умным сарказмом\n• Стала ещё умнее и быстрее!")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в .env файле!")
@@ -502,51 +498,54 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
         logger.error(f"Ошибка Wikipedia API: {e}")
         return None
 
-# ============== ФУНКЦИЯ РАССЫЛКИ ==============
-async def send_deploy_notification(application: Application):
-    """Отправляет сообщение во все группы, где есть бот."""
-    if not SEND_DEPLOY_NOTIFICATION:
-        logger.info("🔕 Рассылка при деплое отключена (SEND_DEPLOY_NOTIFICATION=False)")
+# ============== НОВАЯ КОМАНДА РАССЫЛКИ ==============
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправить сообщение во все известные чаты (группы и личные)."""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Только владелец может использовать эту команду.")
         return
-    
-    try:
-        # Получаем список всех чатов, где есть бот
-        updates = await application.bot.get_updates()
-        chat_ids = set()
-        
-        # Собираем chat_id из всех обновлений
-        for update in updates:
-            if update.message and update.message.chat:
-                chat_ids.add(update.message.chat.id)
-            elif update.callback_query and update.callback_query.message:
-                chat_ids.add(update.callback_query.message.chat.id)
-            elif update.chat_join_request:
-                chat_ids.add(update.chat_join_request.chat.id)
-        
-        # Также проверяем чаты из локального хранилища
-        for chat_id in chat_members.keys():
-            chat_ids.add(chat_id)
-        
-        logger.info(f"📢 Отправляю рассылку в {len(chat_ids)} чатов...")
-        
-        sent_count = 0
-        for chat_id in chat_ids:
-            try:
-                # Проверяем, что бот может писать в этот чат
-                await application.bot.send_chat_action(chat_id=chat_id, action="typing")
-                await application.bot.send_message(
-                    chat_id=chat_id,
-                    text=DEPLOY_MESSAGE,
-                    parse_mode='Markdown'
-                )
-                sent_count += 1
-                await asyncio.sleep(0.5)  # Небольшая задержка, чтобы не превысить лимиты
-            except Exception as e:
-                logger.warning(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
-        
-        logger.info(f"✅ Рассылка завершена. Отправлено в {sent_count} чатов.")
-    except Exception as e:
-        logger.error(f"Ошибка при рассылке: {e}")
+
+    text = update.message.text.replace("/broadcast", "").strip()
+    if not text:
+        await update.message.reply_text(
+            "❌ Напишите текст для рассылки после команды.\n"
+            "Пример: /broadcast Всем привет! Обновление бота."
+        )
+        return
+
+    # Собираем все chat_id из chat_members
+    all_chats = list(chat_members.keys())
+    if not all_chats:
+        await update.message.reply_text("📭 Нет известных чатов.")
+        return
+
+    status_msg = await update.message.reply_text(f"⏳ Начинаю рассылку в {len(all_chats)} чатов...")
+    success = 0
+    errors = 0
+
+    for cid in all_chats:
+        try:
+            await context.bot.send_message(chat_id=cid, text=text, parse_mode='Markdown')
+            success += 1
+        except Exception as e:
+            logger.error(f"Ошибка отправки в чат {cid}: {e}")
+            errors += 1
+        await asyncio.sleep(0.1)  # защита от флуда
+
+    # Дополнительно отправляем владельцу, если он не в списке (или чтобы точно получил)
+    if OWNER_USER_ID and OWNER_USER_ID not in all_chats:
+        try:
+            await context.bot.send_message(chat_id=OWNER_USER_ID, text=f"📢 Копия рассылки:\n\n{text}")
+            success += 1
+        except:
+            pass
+
+    await status_msg.edit_text(
+        f"✅ Рассылка завершена.\n"
+        f"📨 Успешно: {success}\n"
+        f"❌ Ошибок: {errors}"
+    )
 
 # ============== КОМАНДЫ ==============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -593,7 +592,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast (только владелец)\n"
         "• Владельцу:\n"
         "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) lub 'все'\n"
         "   • 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
@@ -609,6 +608,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /settimezone <таймзона> — указать часовой пояс\n"
         "• /notes — показать последние заметки\n"
         "• /delnote <id> — удалить заметку\n"
+        "• /broadcast <текст> — отправить сообщение во все известные чаты (только владелец)\n"
         "• Используй кнопки",
         reply_markup=keyboard
     )
@@ -1174,7 +1174,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote",
+            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
@@ -1201,6 +1201,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/settimezone <таймзона> — установить часовой пояс\n"
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
+            "/broadcast <текст> — отправить сообщение во все известные чаты (только владелец)\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
             "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
             "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
@@ -1766,6 +1767,7 @@ def main():
     application.add_handler(CommandHandler("settimezone", settimezone_command))
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))  # <-- НОВАЯ КОМАНДА
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -1807,6 +1809,7 @@ def main():
             BotCommand("settimezone", "Установить часовой пояс"),
             BotCommand("notes", "Показать заметки"),
             BotCommand("delnote", "Удалить заметку (id)"),
+            BotCommand("broadcast", "Рассылка во все чаты (владелец)"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("✅ Команды установлены")
@@ -1819,8 +1822,8 @@ def main():
         else:
             logger.warning("⚠️ Владелец не установлен")
 
-        # Запускаем рассылку после инициализации
-        await send_deploy_notification(app)
+        # Автоматическая рассылка при запуске ОТКЛЮЧЕНА
+        # Вместо неё используйте команду /broadcast
 
     application.post_init = post_init
 

@@ -224,7 +224,7 @@ def get_or_create_user_info(user_id, username=None, first_name=None, last_name=N
             "language_code": user_info.language_code,
             "timezone": user_info.timezone,
             "city": user_info.city,
-            "custom_name": user_info.custom_name,  # <-- ДОБАВЛЕНО
+            "custom_name": user_info.custom_name,
         }
     except Exception as e:
         session.rollback()
