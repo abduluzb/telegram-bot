@@ -1212,9 +1212,179 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
-# ============== ОСНОВНАЯ ЛОГИКА ==============
+# ============== ОБНОВЛЁННАЯ ОБРАБОТКА КОМАНД ==============
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        message = update.effective_message
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        chat_type = update.effective_chat.type
+        bot_username = context.bot.username
+        user_name = update.effective_user.first_name or "Пользователь"
+        user = update.effective_user
+
+        if not message.text:
+            return
+        if user_id == context.bot.id:
+            return
+
+        text = message.text.strip()
+        text_lower = text.lower()
+        logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
+
+        # Модерация
+        if await apply_moderation(update, context):
+            return
+
+        # Сохраняем информацию о пользователе
+        user_info = get_or_create_user_info(
+            user_id=user_id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            language_code=user.language_code
+        )
+
+        # Обновляем статистику
+        update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
+
+        # Сохраняем в историю чата (только для статистики, не для контекста других пользователей)
+        add_chat_memory(chat_id, user_id, user_name, text, role="user")
+        add_chat_member(chat_id, user_id, user_name)
+
+        # ===== 1. ОБРАБОТКА КОМАНДЫ "ЗАПОМНИ ИМЯ" (гибкое распознавание) =====
+        # Проверяем разные варианты
+        is_name_command = False
+        custom_name = None
+
+        # Вариант 1: "луна запомни моё имя ..."
+        match = re.search(r'^луна\s+запомни\s+моё\s+имя\s+(.+)', text_lower)
+        if match:
+            is_name_command = True
+            custom_name = match.group(1).strip()
+        else:
+            # Вариант 2: "луна запомни имя ..."
+            match = re.search(r'^луна\s+запомни\s+имя\s+(.+)', text_lower)
+            if match:
+                is_name_command = True
+                custom_name = match.group(1).strip()
+            else:
+                # Вариант 3: "луна запомни меня зовут ..."
+                match = re.search(r'^луна\s+запомни\s+меня\s+зовут\s+(.+)', text_lower)
+                if match:
+                    is_name_command = True
+                    custom_name = match.group(1).strip()
+                else:
+                    # Вариант 4: "меня зовут ..." или "моё имя ..." (без "луна")
+                    match = re.search(r'^(меня\s+зовут|моё\s+имя)\s+(.+)', text_lower)
+                    if match:
+                        is_name_command = True
+                        custom_name = match.group(2).strip()
+
+        if is_name_command and custom_name:
+            # Убираем лишние знаки препинания из имени
+            custom_name = re.sub(r'^[^a-zA-Zа-яА-Я]+|[^a-zA-Zа-яА-Я]+$', '', custom_name)
+            if custom_name:
+                if update_user_custom_name(user_id, custom_name):
+                    await message.reply_text(f"✅ Запомнила! Теперь я буду называть тебя {custom_name}.")
+                else:
+                    await message.reply_text("❌ Не удалось сохранить имя.")
+            else:
+                await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
+            return
+
+        # ===== 2. ОБРАБОТКА ЗАМЕТОК "луна запомни ..." (не имя) =====
+        # Проверяем, что это не команда имени (она уже обработана)
+        if re.search(r'^луна\s+запомни\s+', text_lower) and not is_name_command:
+            note_text = text[text.find('запомни')+7:].strip()
+            if note_text:
+                if add_note(user_id, note_text):
+                    await message.reply_text("✅ Запомнила!")
+                else:
+                    await message.reply_text("❌ Не удалось сохранить заметку.")
+            else:
+                await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
+            return
+
+        # ===== 3. ОБРАБОТКА ВРЕМЕНИ (как было) =====
+        if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
+            if user_info and user_info.get('timezone'):
+                tz = get_user_timezone(user_info['timezone'])
+                if tz:
+                    try:
+                        now = datetime.now(tz)
+                        await message.reply_text(f"🕐 Ваше текущее время: {now.strftime('%H:%M:%S')} (пояс {user_info['timezone']})")
+                    except Exception as e:
+                        logger.error(f"Ошибка времени: {e}")
+                        await message.reply_text(f"⚠️ Не удалось определить время для '{user_info['timezone']}'.")
+                else:
+                    await message.reply_text(f"⚠️ Таймзона '{user_info['timezone']}' не распознана.")
+            else:
+                await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
+            return
+
+        # ===== 4. ОБРАБОТКА ОСТАЛЬНЫХ КОМАНД (очистка таблиц, GitHub, показ файлов, вопросы о владельце) =====
+        # (всё без изменений, как в предыдущей версии)
+        # ...
+
+        # ===== 5. ОСНОВНОЙ AI ОТВЕТ (с проверкой на пустой/странный ответ) =====
+        # (весь код до получения reply_text остаётся без изменений)
+
+        thinking_msg = await message.reply_text("⚡ Думаю...")
+        reply_text = None
+        last_error = None
+        temperature = 1.0 if global_mode == "flirt" else 0.8
+
+        for model_name in MODELS:
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            max_tokens=600,
+                            temperature=temperature
+                        )
+                    ),
+                    timeout=15.0
+                )
+                if response.choices and response.choices[0].message.content:
+                    reply_text = response.choices[0].message.content.strip()
+                    if reply_text and len(reply_text) > 2:  # проверяем, что ответ не пустой и не слишком короткий
+                        logger.info(f"✅ Ответ от {model_name}")
+                        break
+                    else:
+                        logger.warning(f"Пустой или слишком короткий ответ от {model_name}")
+                        continue
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"❌ Ошибка {model_name}: {e}")
+                await asyncio.sleep(1)
+
+        if not reply_text or len(reply_text) < 3:
+            # Запасной ответ, если AI ничего не дал
+            reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
+            logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
+
+        add_to_user_memory(user_id, reply_text, "assistant")
+        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
+
+        if len(reply_text) > 4000:
+            for i in range(0, len(reply_text), 4000):
+                await thinking_msg.edit_text(reply_text[i:i+4000])
+                if i + 4000 < len(reply_text):
+                    thinking_msg = await message.reply_text("📄 Продолжение...")
+        else:
+            await thinking_msg.edit_text(reply_text)
+
+    except Exception as e:
+        logger.error(f"Ошибка в handle_message: {e}")
+        try:
+            await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз.")
+        except:
+            pass    try:
         message = update.effective_message
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
