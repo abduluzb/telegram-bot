@@ -1,4 +1,4 @@
-# bot.py - Luna AI с улучшенным распознаванием команд, запоминанием имени и проверкой ответов
+# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени и рассылкой при деплое
 
 import os
 import asyncio
@@ -75,6 +75,10 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
+
+# Переменные для рассылки
+SEND_DEPLOY_NOTIFICATION = os.getenv("SEND_DEPLOY_NOTIFICATION", "True").lower() == "true"
+DEPLOY_MESSAGE = os.getenv("DEPLOY_MESSAGE", "🌙 Привет! Я обновилась! ✨\nТеперь я умею:\n• Запоминать твоё имя\n• Отвечать с умным сарказмом\n• Стала ещё умнее и быстрее!")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в .env файле!")
@@ -230,7 +234,6 @@ def clear_memory(user_id: int, chat_id: int = None):
         clear_chat_memory(chat_id)
 
 def build_context(chat_id: int, user_id: int, user_name: str, custom_name: str = None) -> str:
-    # Используем только историю пользователя (не чата)
     user_history = get_user_history(user_id, limit=30)
     user_hist = get_user_memory(user_id)
     members = get_chat_members(chat_id)
@@ -499,6 +502,52 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
         logger.error(f"Ошибка Wikipedia API: {e}")
         return None
 
+# ============== ФУНКЦИЯ РАССЫЛКИ ==============
+async def send_deploy_notification(application: Application):
+    """Отправляет сообщение во все группы, где есть бот."""
+    if not SEND_DEPLOY_NOTIFICATION:
+        logger.info("🔕 Рассылка при деплое отключена (SEND_DEPLOY_NOTIFICATION=False)")
+        return
+    
+    try:
+        # Получаем список всех чатов, где есть бот
+        updates = await application.bot.get_updates()
+        chat_ids = set()
+        
+        # Собираем chat_id из всех обновлений
+        for update in updates:
+            if update.message and update.message.chat:
+                chat_ids.add(update.message.chat.id)
+            elif update.callback_query and update.callback_query.message:
+                chat_ids.add(update.callback_query.message.chat.id)
+            elif update.chat_join_request:
+                chat_ids.add(update.chat_join_request.chat.id)
+        
+        # Также проверяем чаты из локального хранилища
+        for chat_id in chat_members.keys():
+            chat_ids.add(chat_id)
+        
+        logger.info(f"📢 Отправляю рассылку в {len(chat_ids)} чатов...")
+        
+        sent_count = 0
+        for chat_id in chat_ids:
+            try:
+                # Проверяем, что бот может писать в этот чат
+                await application.bot.send_chat_action(chat_id=chat_id, action="typing")
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=DEPLOY_MESSAGE,
+                    parse_mode='Markdown'
+                )
+                sent_count += 1
+                await asyncio.sleep(0.5)  # Небольшая задержка, чтобы не превысить лимиты
+            except Exception as e:
+                logger.warning(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
+        
+        logger.info(f"✅ Рассылка завершена. Отправлено в {sent_count} чатов.")
+    except Exception as e:
+        logger.error(f"Ошибка при рассылке: {e}")
+
 # ============== КОМАНДЫ ==============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -511,7 +560,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         language_code=user.language_code
     )
     custom_name = user_info.get('custom_name') if user_info else None
-    greeting = "🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
+    greeting = f"🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
     if custom_name:
         greeting += f"Рада снова видеть тебя, {custom_name}! "
     else:
@@ -543,10 +592,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
-        "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>' или 'меня зовут <имя>'\n"
+        "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote\n"
         "• Владельцу:\n"
-        "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
+        "   • 'луна очисти таблицу <имя>' – очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) lub 'все'\n"
         "   • 'луна искать в коде <текст>' – поиск в GitHub репозитории\n"
         "   • 'луна показать файл <путь>' – показать содержимое файла из репозитория\n"
         "   • 'луна объясни файл <путь>' – AI-объяснение кода файла\n"
@@ -1231,9 +1280,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
+        # Модерация
         if await apply_moderation(update, context):
             return
 
+        # Сохраняем информацию о пользователе
         user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -1242,8 +1293,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             language_code=user.language_code
         )
 
+        # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
+        # Сохраняем в историю чата (только для статистики, не для контекста других пользователей)
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
@@ -1317,6 +1370,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ===== 4. ОБРАБОТКА ОСТАЛЬНЫХ КОМАНД (очистка таблиц, GitHub, показ файлов, вопросы о владельце) =====
+        # --- Очистка таблиц (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -1343,6 +1397,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
+        # --- GitHub поиск (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
@@ -1366,6 +1421,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
+        # --- Показать файл (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
             if match:
@@ -1396,6 +1452,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
                 return
 
+        # --- Объяснить файл (владелец) ---
         if is_owner(user_id):
             match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
             if match:
@@ -1442,6 +1499,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"❌ Ошибка при анализе: {e}")
                 return
 
+        # --- Вопросы о владельце ---
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -1454,6 +1512,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
+        # --- Внешность владельца ---
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -1473,7 +1532,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # ===== 5. ОСНОВНОЙ AI ОТВЕТ =====
+        # --- Определяем, нужно ли отвечать ---
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1508,11 +1567,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
+        # --- Википедия ---
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
+        # --- Лимит спама ---
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1521,6 +1582,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
+        # --- Подготовка к AI ---
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1548,6 +1610,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
+        # ===== ПРОМПТЫ =====
         mode_prompts = {
             "fast": f"""Ты — Луна, быстрый AI-помощник. Отвечай кратко, только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
 Анализируй эмоциональное состояние пользователя и адаптируй ответ.
@@ -1755,6 +1818,9 @@ def main():
             logger.info(f"👑 Владелец: {OWNER_NAME} (ID: {OWNER_USER_ID})")
         else:
             logger.warning("⚠️ Владелец не установлен")
+
+        # Запускаем рассылку после инициализации
+        await send_deploy_notification(app)
 
     application.post_init = post_init
 
