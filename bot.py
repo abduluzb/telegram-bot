@@ -1,4 +1,4 @@
-# bot.py - Luna AI с динамическим режимом (auto), поддержкой фото в рассылке и запоминанием имени
+# bot.py - Luna AI с динамическим режимом (auto), поддержкой фото в рассылке и отладочным логированием
 
 import os
 import asyncio
@@ -1297,6 +1297,9 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 # ============== ОСНОВНАЯ ЛОГИКА ==============
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Отладочное логирование: видим ВСЕ текстовые сообщения, включая команды
+    if update.message and update.message.text:
+        logger.info(f"🔍 [DEBUG] Получен текст: {update.message.text} от {update.effective_user.id}")
     try:
         message = update.effective_message
         user_id = update.effective_user.id
