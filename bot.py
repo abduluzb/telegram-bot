@@ -1,4 +1,4 @@
-# bot.py - Luna AI с улучшенным сарказмом, без истории чата, с запоминанием имени и ручной рассылкой (команда /broadcast)
+# bot.py - Luna AI с динамическим режимом (auto), поддержкой фото в рассылке и запоминанием имени
 
 import os
 import asyncio
@@ -403,13 +403,13 @@ async def setmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = get_global_mode()
         await update.message.reply_text(
             f"Текущий режим: {current}\n"
-            "Использование: /setmode <fast|smart|sarcastic|flirt>"
+            "Использование: /setmode <fast|smart|sarcastic|flirt|auto>"
         )
         return
     mode = context.args[0].lower()
-    valid_modes = ["fast", "smart", "sarcastic", "flirt"]
+    valid_modes = ["fast", "smart", "sarcastic", "flirt", "auto"]
     if mode not in valid_modes:
-        await update.message.reply_text("Некорректный режим. Доступны: fast, smart, sarcastic, flirt")
+        await update.message.reply_text("Некорректный режим. Доступны: fast, smart, sarcastic, flirt, auto")
         return
     set_global_mode(mode)
     logger.info(f"Владелец установил глобальный режим: {mode}")
@@ -498,23 +498,25 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
         logger.error(f"Ошибка Wikipedia API: {e}")
         return None
 
-# ============== НОВАЯ КОМАНДА РАССЫЛКИ ==============
+# ============== КОМАНДА РАССЫЛКИ С ФОТО ==============
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправить сообщение во все известные чаты (группы и личные)."""
+    """Отправить текстовое сообщение или фото+текст во все известные чаты."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец может использовать эту команду.")
         return
 
-    text = update.message.text.replace("/broadcast", "").strip()
-    if not text:
+    text = update.message.caption or update.message.text or ""
+    text = re.sub(r'^/broadcast\s*', '', text).strip()
+    photo = update.message.photo[-1] if update.message.photo else None
+
+    if not text and not photo:
         await update.message.reply_text(
-            "❌ Напишите текст для рассылки после команды.\n"
-            "Пример: /broadcast Всем привет! Обновление бота."
+            "❌ Напишите текст для рассылки после команды или прикрепите фото.\n"
+            "Пример: /broadcast Всем привет! (с фото или без)"
         )
         return
 
-    # Собираем все chat_id из chat_members
     all_chats = list(chat_members.keys())
     if not all_chats:
         await update.message.reply_text("📭 Нет известных чатов.")
@@ -526,17 +528,40 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for cid in all_chats:
         try:
-            await context.bot.send_message(chat_id=cid, text=text, parse_mode='Markdown')
+            if photo:
+                await context.bot.send_photo(
+                    chat_id=cid,
+                    photo=photo.file_id,
+                    caption=text if text else None,
+                    parse_mode='Markdown'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=cid,
+                    text=text,
+                    parse_mode='Markdown'
+                )
             success += 1
         except Exception as e:
             logger.error(f"Ошибка отправки в чат {cid}: {e}")
             errors += 1
-        await asyncio.sleep(0.1)  # защита от флуда
+        await asyncio.sleep(0.1)
 
-    # Дополнительно отправляем владельцу, если он не в списке (или чтобы точно получил)
     if OWNER_USER_ID and OWNER_USER_ID not in all_chats:
         try:
-            await context.bot.send_message(chat_id=OWNER_USER_ID, text=f"📢 Копия рассылки:\n\n{text}")
+            if photo:
+                await context.bot.send_photo(
+                    chat_id=OWNER_USER_ID,
+                    photo=photo.file_id,
+                    caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
+                    parse_mode='Markdown'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=OWNER_USER_ID,
+                    text=f"📢 Копия рассылки:\n\n{text}",
+                    parse_mode='Markdown'
+                )
             success += 1
         except:
             pass
@@ -600,7 +625,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   • 'луна объясни файл <путь>' – AI-объяснение кода файла\n"
         "• /warn можно использовать с reply на сообщение пользователя\n"
         "• /setmoderation on/off — включить/выключить авто-модерацию (только владелец)\n"
-        "• /setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
+        "• /setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим (только владелец)\n"
+        "   • auto — бот сам определяет тон ответа (сарказм или серьёзно)\n"
         "• /getmode — показать текущий режим (для всех)\n"
         "• /wiki <запрос> — поиск в Википедии\n"
         "• /owners — показать владельца бота\n"
@@ -608,7 +634,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /settimezone <таймзона> — указать часовой пояс\n"
         "• /notes — показать последние заметки\n"
         "• /delnote <id> — удалить заметку\n"
-        "• /broadcast <текст> — отправить сообщение во все известные чаты (только владелец)\n"
+        "• /broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
         "• Используй кнопки",
         reply_markup=keyboard
     )
@@ -1193,7 +1219,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/warn — предупреждение/бан (поддерживает reply)\n"
             "/unban — разбан (поддерживает reply)\n"
             "/setmoderation on/off — авто-модерация (только владелец)\n"
-            "/setmode <fast|smart|sarcastic|flirt> — глобальный режим (только владелец)\n"
+            "/setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим (только владелец)\n"
+            "   auto — бот сам выбирает тон (сарказм/серьёзно)\n"
             "/getmode — показать текущий режим\n"
             "/wiki <запрос> — поиск в Википедии\n"
             "/owners — показать владельца\n"
@@ -1201,7 +1228,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/settimezone <таймзона> — установить часовой пояс\n"
             "/notes — показать заметки\n"
             "/delnote <id> — удалить заметку\n"
-            "/broadcast <текст> — отправить сообщение во все известные чаты (только владелец)\n"
+            "/broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
             "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
             "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
@@ -1218,6 +1245,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🧠 Умный", callback_data="setmode_smart")],
             [InlineKeyboardButton("😈 Саркастичный", callback_data="setmode_sarcastic")],
             [InlineKeyboardButton("🔞 Флирт", callback_data="setmode_flirt")],
+            [InlineKeyboardButton("🌀 Авто (сам выберу тон)", callback_data="setmode_auto")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Выбери глобальный режим ответа:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1226,12 +1254,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
             return
         mode = data.replace("setmode_", "")
-        valid_modes = ["fast", "smart", "sarcastic", "flirt"]
+        valid_modes = ["fast", "smart", "sarcastic", "flirt", "auto"]
         if mode not in valid_modes:
             await query.edit_message_text("Некорректный режим.", reply_markup=get_main_menu_keyboard())
             return
         set_global_mode(mode)
-        mode_names = {"fast": "⚡ Быстрый", "smart": "🧠 Умный", "sarcastic": "😈 Саркастичный", "flirt": "🔞 Флирт"}
+        mode_names = {
+            "fast": "⚡ Быстрый",
+            "smart": "🧠 Умный",
+            "sarcastic": "😈 Саркастичный",
+            "flirt": "🔞 Флирт",
+            "auto": "🌀 Авто (адаптивный)"
+        }
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
 
 # ============== ГЛАВНОЕ МЕНЮ ==============
@@ -1297,40 +1331,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
 
-        # Сохраняем в историю чата (только для статистики, не для контекста других пользователей)
+        # Сохраняем в историю чата
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # ===== 1. ОБРАБОТКА КОМАНДЫ "ЗАПОМНИ ИМЯ" (гибкое распознавание) =====
+        # ===== 1. ОБРАБОТКА КОМАНДЫ "ЗАПОМНИ ИМЯ" =====
         is_name_command = False
         custom_name = None
 
-        # Вариант 1: "луна запомни моё имя ..."
         match = re.search(r'^луна\s+запомни\s+моё\s+имя\s+(.+)', text_lower)
         if match:
             is_name_command = True
             custom_name = match.group(1).strip()
         else:
-            # Вариант 2: "луна запомни имя ..."
             match = re.search(r'^луна\s+запомни\s+имя\s+(.+)', text_lower)
             if match:
                 is_name_command = True
                 custom_name = match.group(1).strip()
             else:
-                # Вариант 3: "луна запомни меня зовут ..."
                 match = re.search(r'^луна\s+запомни\s+меня\s+зовут\s+(.+)', text_lower)
                 if match:
                     is_name_command = True
                     custom_name = match.group(1).strip()
                 else:
-                    # Вариант 4: "меня зовут ..." или "моё имя ..." (без "луна")
                     match = re.search(r'^(меня\s+зовут|моё\s+имя)\s+(.+)', text_lower)
                     if match:
                         is_name_command = True
                         custom_name = match.group(2).strip()
 
         if is_name_command and custom_name:
-            # Убираем лишние знаки препинания из имени
             custom_name = re.sub(r'^[^a-zA-Zа-яА-Я]+|[^a-zA-Zа-яА-Я]+$', '', custom_name)
             if custom_name:
                 if update_user_custom_name(user_id, custom_name):
@@ -1341,7 +1370,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
             return
 
-        # ===== 2. ОБРАБОТКА ЗАМЕТОК "луна запомни ..." (не имя) =====
+        # ===== 2. ЗАМЕТКИ =====
         if re.search(r'^луна\s+запомни\s+', text_lower) and not is_name_command:
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -1353,7 +1382,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # ===== 3. ОБРАБОТКА ВРЕМЕНИ =====
+        # ===== 3. ВРЕМЯ =====
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
                 tz = get_user_timezone(user_info['timezone'])
@@ -1370,8 +1399,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
             return
 
-        # ===== 4. ОБРАБОТКА ОСТАЛЬНЫХ КОМАНД (очистка таблиц, GitHub, показ файлов, вопросы о владельце) =====
-        # --- Очистка таблиц (владелец) ---
+        # ===== 4. ОСТАЛЬНЫЕ КОМАНДЫ (владелец) =====
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -1398,8 +1426,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-        # --- GitHub поиск (владелец) ---
-        if is_owner(user_id):
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
                 query_text = match.group(1).strip()
@@ -1422,8 +1448,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
-        # --- Показать файл (владелец) ---
-        if is_owner(user_id):
             match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1453,8 +1477,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
                 return
 
-        # --- Объяснить файл (владелец) ---
-        if is_owner(user_id):
             match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1500,7 +1522,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"❌ Ошибка при анализе: {e}")
                 return
 
-        # --- Вопросы о владельце ---
+        # Вопросы о владельце
         if re.search(r'(кто твой хозяин|чей ты бот|кто тебя создал|кто создатель|кто владелец|чьи ты|кому принадлежишь)', text_lower):
             global OWNER_NAME
             if OWNER_NAME:
@@ -1513,7 +1535,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # --- Внешность владельца ---
         if re.search(r'(как выглядит (хозяин|создатель)|опиши хозяина|какой (мой )?хозяин|внешность хозяина|какой он|опиши внешность|как выглядит мой создатель|какой создатель|опиши создателя)', text_lower):
             global OWNER_DESCRIPTION
             if OWNER_NAME and OWNER_DESCRIPTION:
@@ -1533,7 +1554,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # --- Определяем, нужно ли отвечать ---
+        # Определяем, нужно ли отвечать
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1568,13 +1589,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # --- Википедия ---
+        # Википедия
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # --- Лимит спама ---
+        # Лимит спама
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1583,7 +1604,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # --- Подготовка к AI ---
+        # Подготовка к AI
         global_mode = get_global_mode()
         user_stats = get_user_stats(user_id)
         if user_stats:
@@ -1639,7 +1660,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "flirt": f"""Ты — Луна, живая, дерзкая, остроумная. Твой стиль — лёгкий флирт с намёками и метафорами. Ты в {location}. Пользователь: {user_name}.
 Анализируй эмоции и адаптируй флирт.
 {style_note}
-{user_time_str}"""
+{user_time_str}""",
+
+            "auto": f"""Ты — Луна, умный и адаптивный AI-ассистент. Твоя задача — анализировать каждый вопрос и выбирать подходящий тон ответа.
+
+Правила выбора тона:
+1. Если вопрос серьёзный, требует фактов, логики, касается науки, работы, здоровья, важных событий — отвечай **серьёзно, информативно и полезно**.
+2. Если вопрос лёгкий, шутливый, содержит иронию, сарказм, подвох или юмор — отвечай **с умной иронией, сарказмом или игриво** (но не грубо).
+3. Если вопрос нейтральный — выбери тон, который лучше всего подходит по контексту.
+4. Всегда учитывай настроение пользователя и его историю сообщений.
+5. Не используй банальные шутки, будь оригинальна.
+6. Если пользователь назвал своё имя — обращайся к нему по имени.
+
+Ты в {location}.
+{style_note}
+{user_time_str}
+Всегда отвечай на русском языке. Будь естественной и живой."""
         }
 
         system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
@@ -1767,7 +1803,7 @@ def main():
     application.add_handler(CommandHandler("settimezone", settimezone_command))
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))  # <-- НОВАЯ КОМАНДА
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -1822,15 +1858,12 @@ def main():
         else:
             logger.warning("⚠️ Владелец не установлен")
 
-        # Автоматическая рассылка при запуске ОТКЛЮЧЕНА
-        # Вместо неё используйте команду /broadcast
-
     application.post_init = post_init
 
     logger.info("🚀 Luna AI запущен на Cerebras API!")
     logger.info("⚡ Скорость: ~2,000 токенов/сек")
     logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
-    logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt (меняет владелец)")
+    logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto (меняет владелец)")
     logger.info("🧘 Анализ эмоций включён")
     logger.info("📝 Напоминания активны")
     logger.info("🛡️ Модерация: автоматическая + ручная (владелец исключён)")
