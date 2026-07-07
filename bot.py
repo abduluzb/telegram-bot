@@ -896,9 +896,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ============== ОСТАЛЬНЫЕ КОМАНДЫ (weather, imagine, yt, remind, members, reset, stats, warn, unban, wiki, owners, setcity, settimezone, notes, delnote) ==============
-# Для краткости я оставлю их в виде заглушек, но в финальном коде они должны быть полными.
-# Ниже приведены полные реализации всех этих команд (они уже были в предыдущих версиях).
-
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -1403,7 +1400,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
     elif data == "admin_panel":
-        # Запускаем админ-панель через команду /admin
         await query.edit_message_text("👑 Загружаю админ-панель...")
         await admin_command(update, context)
 
@@ -1989,6 +1985,14 @@ def main():
                 OWNER_NAME = f"ID: {OWNER_USER_ID}"
         else:
             OWNER_NAME = None
+
+        # === ЗАГРУЗКА CHAT_ID ИЗ БД ===
+        from database import get_all_chat_ids
+        chat_ids = get_all_chat_ids()
+        for cid in chat_ids:
+            if cid not in chat_members:
+                chat_members[cid] = set()
+        logger.info(f"📥 Загружено {len(chat_ids)} чатов из базы данных")
 
         commands = [
             BotCommand("start", "Начать работу"),

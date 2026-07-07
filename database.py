@@ -1,4 +1,4 @@
-# database.py - с поддержкой custom_name и режима auto
+# database.py - с поддержкой custom_name, auto-режима и загрузки chat_id
 
 import os
 import logging
@@ -76,7 +76,7 @@ class UserInfo(Base):
     language_code = Column(String(10), nullable=True)
     timezone = Column(String(50), nullable=True)
     city = Column(String(100), nullable=True)
-    custom_name = Column(String(255), nullable=True)  # <-- ДОБАВЛЕНО
+    custom_name = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -166,7 +166,7 @@ def get_global_mode(default="fast") -> str:
         session.close()
 
 def set_global_mode(mode: str) -> None:
-    valid = ["fast", "smart", "sarcastic", "flirt", "auto"]  # <-- ДОБАВЛЕН auto
+    valid = ["fast", "smart", "sarcastic", "flirt", "auto"]
     if mode not in valid:
         raise ValueError(f"Некорректный режим: {mode}")
     session = get_session()
@@ -526,3 +526,16 @@ def init_db():
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к базе данных: {e}")
         raise
+
+# ============== НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ CHAT_ID ==============
+def get_all_chat_ids():
+    """Возвращает список всех уникальных chat_id из таблицы chat_memory."""
+    session = get_session()
+    try:
+        rows = session.query(ChatMemory.chat_id).distinct().all()
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"Ошибка загрузки chat_id: {e}")
+        return []
+    finally:
+        session.close()
