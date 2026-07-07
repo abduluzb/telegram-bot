@@ -1,4 +1,4 @@
-# database.py - с поддержкой custom_name (для запоминания имени пользователя)
+# database.py - с поддержкой custom_name и режима auto
 
 import os
 import logging
@@ -166,7 +166,7 @@ def get_global_mode(default="fast") -> str:
         session.close()
 
 def set_global_mode(mode: str) -> None:
-    valid = ["fast", "smart", "sarcastic", "flirt"]
+    valid = ["fast", "smart", "sarcastic", "flirt", "auto"]  # <-- ДОБАВЛЕН auto
     if mode not in valid:
         raise ValueError(f"Некорректный режим: {mode}")
     session = get_session()
@@ -256,7 +256,6 @@ def update_user_city_timezone(user_id, city=None, timezone=None):
 
 @retry_on_disconnect
 def update_user_custom_name(user_id, custom_name):
-    """Сохраняет кастомное имя пользователя."""
     session = get_session()
     try:
         user_info = session.query(UserInfo).filter_by(user_id=user_id).first()
