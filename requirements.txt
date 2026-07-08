@@ -1,8 +1,9 @@
-python-telegram-bot>=20.8
-cerebras-cloud-sdk
-google-api-python-client
-aiohttp
-python-dotenv
-SQLAlchemy>=2.0.0
-pymysql
-pytz
+python-telegram-bot==20.7
+cerebras-cloud-sdk==1.1.0
+google-api-python-client==2.108.0
+aiohttp==3.9.3
+requests==2.31.0
+python-dotenv==1.0.0
+SQLAlchemy==2.0.25
+pytz==2023.3
+pymysql==1.1.0

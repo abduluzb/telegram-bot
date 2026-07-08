@@ -1,4 +1,4 @@
-# database.py - с поддержкой custom_name, auto-режима и загрузки chat_id
+# database.py - полная версия с новыми моделями
 
 import os
 import logging
@@ -7,28 +7,25 @@ import re
 from typing import List, Optional, Dict, Any
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, Float,
-    DateTime, BigInteger, Boolean, ForeignKey, text
+    DateTime, BigInteger, Boolean, ForeignKey, text, Index
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.exc import OperationalError, InterfaceError
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# === Определяем, какую БД использовать ===
 USE_SQLITE = os.getenv("USE_SQLITE", "True").lower() == "true"
-
 if USE_SQLITE:
     DATABASE_URL = "sqlite:///luna_bot.db"
-    logger.info("Используется SQLite (локальная БД)")
+    logger.info("Используется SQLite")
 else:
     db_url = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
     if db_url:
         if db_url.startswith("mysql://") and "+pymysql" not in db_url:
             db_url = db_url.replace("mysql://", "mysql+pymysql://", 1)
         DATABASE_URL = db_url
-        logger.info("Используется MySQL по URL из переменной")
     else:
         DB_HOST = os.getenv("MYSQLHOST")
         DB_PORT = os.getenv("MYSQLPORT", "3306")
@@ -53,7 +50,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
-# ============== МОДЕЛИ ==============
+# ===== МОДЕЛИ =====
 
 class UserStats(Base):
     __tablename__ = "user_stats"
@@ -89,6 +86,12 @@ class ChatMemory(Base):
     text = Column(Text)
     role = Column(String(20), default="user")
     timestamp = Column(DateTime, default=datetime.utcnow)
+    is_russian = Column(Boolean, default=False)
+    message_length = Column(Integer, default=0)
+    __table_args__ = (
+        Index('ix_chat_memory_timestamp', 'timestamp'),
+        Index('ix_chat_memory_user_id_timestamp', 'user_id', 'timestamp'),
+    )
 
 class Violation(Base):
     __tablename__ = "violations"
@@ -122,9 +125,56 @@ class Config(Base):
     value = Column(Text, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+# ===== НОВЫЕ МОДЕЛИ =====
+
+class TrainingData(Base):
+    __tablename__ = "training_data"
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    chat_id = Column(BigInteger, index=True)
+    user_id = Column(BigInteger, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        Index('ix_training_data_question', 'question', mysql_length=255),
+    )
+
+class DeletedMessage(Base):
+    __tablename__ = "deleted_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(BigInteger)
+    chat_id = Column(BigInteger, index=True)
+    user_id = Column(BigInteger, index=True)
+    user_name = Column(String(255), nullable=True)
+    text = Column(Text, nullable=True)
+    caption = Column(Text, nullable=True)
+    media_type = Column(String(50), nullable=True)
+    deleted_at = Column(DateTime, default=datetime.utcnow)
+    deleted_by = Column(BigInteger, nullable=True)
+
+class DailyStats(Base):
+    __tablename__ = "daily_stats"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(DateTime, unique=True, index=True)
+    total_messages = Column(Integer, default=0)
+    unique_users = Column(Integer, default=0)
+    active_chats = Column(Integer, default=0)
+    total_commands = Column(Integer, default=0)
+    total_errors = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ReactionLog(Base):
+    __tablename__ = "reaction_log"
+    id = Column(Integer, primary_key=True, index=True)
+    message_id = Column(BigInteger)
+    chat_id = Column(BigInteger, index=True)
+    user_id = Column(BigInteger, index=True)
+    reaction = Column(String(10))
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
 Base.metadata.create_all(bind=engine)
 
-# ============== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==============
+# ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 
 def get_session():
     session = SessionLocal()
@@ -152,16 +202,13 @@ def retry_on_disconnect(func):
                 continue
     return wrapper
 
-# ============== ГЛОБАЛЬНЫЙ РЕЖИМ ==============
+# ===== ГЛОБАЛЬНЫЙ РЕЖИМ =====
 
 def get_global_mode(default="fast") -> str:
     session = get_session()
     try:
         config = session.query(Config).filter_by(key="global_mode").first()
         return config.value if config and config.value else default
-    except Exception as e:
-        logger.error(f"Ошибка получения глобального режима: {e}")
-        return default
     finally:
         session.close()
 
@@ -181,12 +228,11 @@ def set_global_mode(mode: str) -> None:
         session.commit()
     except Exception as e:
         session.rollback()
-        logger.error(f"Ошибка установки глобального режима: {e}")
         raise
     finally:
         session.close()
 
-# ============== ПОЛЬЗОВАТЕЛЬСКАЯ ИНФОРМАЦИЯ ==============
+# ===== ПОЛЬЗОВАТЕЛЬСКАЯ ИНФОРМАЦИЯ =====
 
 @retry_on_disconnect
 def get_or_create_user_info(user_id, username=None, first_name=None, last_name=None, language_code=None):
@@ -272,7 +318,7 @@ def update_user_custom_name(user_id, custom_name):
     finally:
         session.close()
 
-# ============== СТАТИСТИКА ==============
+# ===== СТАТИСТИКА =====
 
 @retry_on_disconnect
 def update_user_stats(user_id, text, username=None, first_name=None):
@@ -297,9 +343,11 @@ def update_user_stats(user_id, text, username=None, first_name=None):
         user.avg_len = (old_total + len(text)) / user.messages_count
         user.last_seen = datetime.utcnow()
         session.commit()
+        return user
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка update_user_stats: {e}")
+        return None
     finally:
         session.close()
 
@@ -317,31 +365,36 @@ def get_user_stats(user_id):
     finally:
         session.close()
 
-# ============== ПАМЯТЬ ЧАТА И ИСТОРИЯ ПОЛЬЗОВАТЕЛЯ ==============
+# ===== ПАМЯТЬ И ИСТОРИЯ =====
 
 @retry_on_disconnect
 def add_chat_memory(chat_id, user_id, user_name, text, role="user"):
     session = get_session()
     try:
+        is_russian = bool(re.search(r'[а-яА-Я]', text))
         memory = ChatMemory(
             chat_id=chat_id,
             user_id=user_id,
             user_name=user_name,
             text=text,
             role=role,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
+            is_russian=is_russian,
+            message_length=len(text)
         )
         session.add(memory)
         session.commit()
-        count = session.query(ChatMemory).filter_by(user_id=user_id).count()
-        if count > 100:
-            oldest = session.query(ChatMemory).filter_by(user_id=user_id).order_by(ChatMemory.timestamp.asc()).first()
+        count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
+        if count > 1000:
+            oldest = session.query(ChatMemory).filter_by(chat_id=chat_id).order_by(ChatMemory.timestamp.asc()).first()
             if oldest:
                 session.delete(oldest)
                 session.commit()
+        return memory
     except Exception as e:
         session.rollback()
         logger.error(f"Ошибка add_chat_memory: {e}")
+        return None
     finally:
         session.close()
 
@@ -372,7 +425,7 @@ def clear_chat_memory(chat_id):
     finally:
         session.close()
 
-# ============== НАРУШЕНИЯ ==============
+# ===== НАРУШЕНИЯ =====
 
 def get_violations(user_id):
     session = get_session()
@@ -413,7 +466,7 @@ def clear_violation(user_id):
     finally:
         session.close()
 
-# ============== НАПОМИНАНИЯ ==============
+# ===== НАПОМИНАНИЯ =====
 
 @retry_on_disconnect
 def add_reminder(user_id, chat_id, text, timestamp):
@@ -447,7 +500,7 @@ def delete_reminder(reminder_id):
     finally:
         session.close()
 
-# ============== ЗАМЕТКИ ==============
+# ===== ЗАМЕТКИ =====
 
 @retry_on_disconnect
 def add_note(user_id, text):
@@ -485,7 +538,7 @@ def delete_note(note_id):
     finally:
         session.close()
 
-# ============== ОЧИСТКА ТАБЛИЦ ==============
+# ===== ОЧИСТКА ТАБЛИЦ =====
 
 @retry_on_disconnect
 def clear_table(table_name: str) -> bool:
@@ -499,14 +552,16 @@ def clear_table(table_name: str) -> bool:
             "reminders": Reminder,
             "notes": Note,
             "config": Config,
+            "training_data": TrainingData,
+            "deleted_messages": DeletedMessage,
+            "daily_stats": DailyStats,
+            "reaction_log": ReactionLog,
         }
         if table_name not in valid:
-            logger.warning(f"Попытка очистить недопустимую таблицу: {table_name}")
             return False
         model = valid[table_name]
-        deleted = session.query(model).delete()
+        session.query(model).delete()
         session.commit()
-        logger.info(f"Очищена таблица {table_name}, удалено {deleted} записей")
         return True
     except Exception as e:
         session.rollback()
@@ -515,7 +570,172 @@ def clear_table(table_name: str) -> bool:
     finally:
         session.close()
 
-# ============== ИНИЦИАЛИЗАЦИЯ ==============
+# ===== НОВЫЕ ФУНКЦИИ =====
+
+def get_all_chat_ids():
+    session = get_session()
+    try:
+        rows = session.query(ChatMemory.chat_id).distinct().all()
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"Ошибка загрузки chat_id: {e}")
+        return []
+    finally:
+        session.close()
+
+def save_training_pair(question, answer, chat_id, user_id):
+    if not re.search(r'[а-яА-Я]', question):
+        return False
+    session = get_session()
+    try:
+        pair = TrainingData(
+            question=question[:500],
+            answer=answer[:500],
+            chat_id=chat_id,
+            user_id=user_id,
+            timestamp=datetime.utcnow()
+        )
+        session.add(pair)
+        session.commit()
+        return True
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка сохранения обучающей пары: {e}")
+        return False
+    finally:
+        session.close()
+
+def find_training_answer(question):
+    session = get_session()
+    try:
+        pair = session.query(TrainingData).filter(
+            TrainingData.question == question[:500]
+        ).order_by(TrainingData.timestamp.desc()).first()
+        if pair:
+            return pair.answer
+        pairs = session.query(TrainingData).filter(
+            TrainingData.question.contains(question[:50])
+        ).order_by(TrainingData.timestamp.desc()).limit(3).all()
+        if pairs:
+            return pairs[0].answer
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска обучения: {e}")
+        return None
+    finally:
+        session.close()
+
+def log_deleted_message(message, deleted_by=None):
+    session = get_session()
+    try:
+        text = message.text or ''
+        caption = message.caption or ''
+        media_type = None
+        if message.photo:
+            media_type = 'photo'
+        elif message.video:
+            media_type = 'video'
+        elif message.audio:
+            media_type = 'audio'
+        elif message.document:
+            media_type = 'document'
+        del_msg = DeletedMessage(
+            message_id=message.message_id,
+            chat_id=message.chat.id,
+            user_id=message.from_user.id if message.from_user else None,
+            user_name=message.from_user.first_name if message.from_user else None,
+            text=text,
+            caption=caption,
+            media_type=media_type,
+            deleted_at=datetime.utcnow(),
+            deleted_by=deleted_by
+        )
+        session.add(del_msg)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка логирования удалённого сообщения: {e}")
+    finally:
+        session.close()
+
+def update_daily_stats():
+    session = get_session()
+    try:
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        total_messages = session.query(ChatMemory).filter(ChatMemory.timestamp >= today).count()
+        unique_users = session.query(ChatMemory.user_id).filter(ChatMemory.timestamp >= today).distinct().count()
+        active_chats = session.query(ChatMemory.chat_id).filter(ChatMemory.timestamp >= today).distinct().count()
+        total_commands = session.query(ChatMemory).filter(
+            ChatMemory.timestamp >= today,
+            ChatMemory.text.like('/%')
+        ).count()
+        stat = session.query(DailyStats).filter_by(date=today).first()
+        if stat:
+            stat.total_messages = total_messages
+            stat.unique_users = unique_users
+            stat.active_chats = active_chats
+            stat.total_commands = total_commands
+        else:
+            stat = DailyStats(
+                date=today,
+                total_messages=total_messages,
+                unique_users=unique_users,
+                active_chats=active_chats,
+                total_commands=total_commands,
+                total_errors=0
+            )
+            session.add(stat)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Ошибка обновления daily_stats: {e}")
+    finally:
+        session.close()
+
+def get_detailed_stats(days=7):
+    session = get_session()
+    try:
+        start_date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
+        stats = session.query(DailyStats).filter(DailyStats.date >= start_date).order_by(DailyStats.date).all()
+        return stats
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        return []
+    finally:
+        session.close()
+
+def get_top_users(limit=10):
+    session = get_session()
+    try:
+        top = session.query(UserStats).order_by(UserStats.messages_count.desc()).limit(limit).all()
+        return [{"user_id": u.user_id, "username": u.username, "first_name": u.first_name, "messages": u.messages_count} for u in top]
+    except Exception as e:
+        logger.error(f"Ошибка получения топ пользователей: {e}")
+        return []
+    finally:
+        session.close()
+
+def get_reaction_for_text(text):
+    if not re.search(r'[а-яА-Я]', text):
+        return None
+    positive_words = ['спасибо', 'отлично', 'супер', 'класс', 'хорошо', 'нравится', 'люблю', 'рад', 'прекрасно', 'отлично', 'здорово']
+    negative_words = ['плохо', 'ужасно', 'ненавижу', 'бесит', 'раздражает', 'грустно', 'печально', 'плохой', 'отвратительно']
+    text_lower = text.lower()
+    for word in positive_words:
+        if word in text_lower:
+            return '👍'
+    for word in negative_words:
+        if word in text_lower:
+            return '😢'
+    if '?' in text:
+        return '🤔'
+    if '!' in text:
+        return '😲'
+    return '😊'
+
+def search_music(query):
+    # Заглушка – реальная интеграция с yt-dlp
+    return None
 
 def init_db():
     try:
@@ -526,16 +746,3 @@ def init_db():
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к базе данных: {e}")
         raise
-
-# ============== НОВАЯ ФУНКЦИЯ ДЛЯ ЗАГРУЗКИ CHAT_ID ==============
-def get_all_chat_ids():
-    """Возвращает список всех уникальных chat_id из таблицы chat_memory."""
-    session = get_session()
-    try:
-        rows = session.query(ChatMemory.chat_id).distinct().all()
-        return [row[0] for row in rows]
-    except Exception as e:
-        logger.error(f"Ошибка загрузки chat_id: {e}")
-        return []
-    finally:
-        session.close()

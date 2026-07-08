@@ -1,4 +1,4 @@
-# bot.py - Luna AI финальная версия с интерактивной админ-панелью, режимом auto и поддержкой фото
+# bot.py - Luna AI с новыми функциями (обучение, аналитика, реакции, музыка)
 
 import os
 import asyncio
@@ -65,6 +65,18 @@ from database import (
     Reminder,
     Note,
     Config,
+    TrainingData,
+    DeletedMessage,
+    DailyStats,
+    ReactionLog,
+    save_training_pair,
+    find_training_answer,
+    log_deleted_message,
+    update_daily_stats,
+    get_detailed_stats,
+    get_top_users,
+    get_reaction_for_text,
+    search_music,
 )
 
 load_dotenv()
@@ -94,12 +106,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === Cerebras ===
 client = Cerebras(api_key=CEREBRAS_API_KEY)
 MODELS = ["gpt-oss-120b", "zai-glm-4.7"]
 logger.info(f"✅ Cerebras API настроен. Моделей: {len(MODELS)}")
 
-# === YouTube ===
 youtube = None
 if YOUTUBE_API_KEY:
     try:
@@ -108,14 +118,12 @@ if YOUTUBE_API_KEY:
     except Exception as e:
         logger.error(f"❌ Ошибка YouTube API: {e}")
 
-# === Хранилища ===
 chat_members: Dict[int, Set[int]] = {}
 user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
 user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
 
-# === Состояния для ConversationHandler админ-панели ===
 WAITING_TEXT, WAITING_PHOTO, CONFIRM = range(3)
 
 # === Вспомогательные функции ===
@@ -211,7 +219,7 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
-# ============== МОДЕРАЦИЯ ==============
+# ===== МОДЕРАЦИЯ =====
 BAD_WORDS = [
     "хуй", "пизда", "блядь", "ёб", "еба", "ебан", "мудак", "гандон", "пидор",
     "сучка", "сука", "жопа", "залупа", "хуйня", "пиздец", "хуесос", "мразь",
@@ -317,7 +325,7 @@ async def apply_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await message.reply_text(f"❌ Не удалось забанить пользователя: {e}")
     return True
 
-# ============== НАПОМИНАНИЯ ==============
+# ===== НАПОМИНАНИЯ =====
 def parse_time(text: str) -> Tuple[Optional[float], str]:
     text_lower = text.lower()
     match = re.search(r'(\d+)\s*(м|мин|с|сек|ч|час|д|день|дня|дней)', text_lower)
@@ -364,7 +372,7 @@ async def check_reminders(application: Application):
     except asyncio.CancelledError:
         pass
 
-# ============== ВИКИПЕДИЯ ==============
+# ===== ВИКИПЕДИЯ =====
 async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
     url = f"https://{lang}.wikipedia.org/w/api.php"
     params = {
@@ -396,7 +404,7 @@ async def get_wikipedia_summary(query: str, lang: str = "ru") -> Optional[str]:
         logger.error(f"Ошибка Wikipedia API: {e}")
         return None
 
-# ============== GITHUB ФУНКЦИИ ==============
+# ===== GITHUB ФУНКЦИИ =====
 def search_github_code(query: str) -> Optional[List[Dict]]:
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return None
@@ -449,10 +457,9 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ============== АДМИН-ПАНЕЛЬ (интерактивная, без Web App) ==============
+# ===== АДМИН-ПАНЕЛЬ =====
 
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
-    """Генерирует клавиатуру админ-панели с учётом состояния."""
     keyboard = []
     row1 = []
     if text_set:
@@ -480,7 +487,6 @@ def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> Inlin
     return InlineKeyboardMarkup(keyboard)
 
 async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запускает админ-панель (только владелец)."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
@@ -507,7 +513,6 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия кнопок админ-панели."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -714,7 +719,8 @@ async def cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ============== КОМАНДЫ ==============
+# ===== КОМАНДЫ =====
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -760,19 +766,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin (только владелец)\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music\n"
         "• Владельцу:\n"
         "   • 'луна очисти таблицу <имя>' – очистить таблицу\n"
         "   • 'луна искать в коде <текст>' – поиск в GitHub\n"
         "   • 'луна показать файл <путь>' – показать файл\n"
         "   • 'луна объясни файл <путь>' – AI-объяснение файла\n"
         "• /setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим\n"
-        "• /admin — открыть админ-панель для рассылки",
+        "• /admin — открыть админ-панель для рассылки\n"
+        "• /stats_detail — подробная статистика (владелец)\n"
+        "• /music — поиск музыки (в разработке)",
         reply_markup=keyboard
     )
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Запускает админ-панель через ConversationHandler."""
     return await admin_panel_start(update, context)
 
 async def setmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -823,7 +830,6 @@ async def set_moderation_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Некорректное значение. Используйте on или off.")
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправить текстовое сообщение или фото+текст во все известные чаты (простая команда)."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец может использовать эту команду.")
@@ -895,7 +901,47 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Ошибок: {errors}"
     )
 
-# ============== ОСТАЛЬНЫЕ КОМАНДЫ (weather, imagine, yt, remind, members, reset, stats, warn, unban, wiki, owners, setcity, settimezone, notes, delnote) ==============
+# ===== НОВЫЕ КОМАНДЫ =====
+
+async def stats_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подробная статистика за 7 дней и топ пользователей (только владелец)."""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Только владелец.")
+        return
+    update_daily_stats()
+    stats = get_detailed_stats(7)
+    if not stats:
+        await update.message.reply_text("📊 Статистика пока пуста.")
+        return
+    lines = ["📊 *Статистика за последние 7 дней:*"]
+    total_messages = 0
+    total_users = 0
+    for s in stats:
+        lines.append(f"📅 {s.date.strftime('%Y-%m-%d')}: {s.total_messages} сообщений, {s.unique_users} пользователей, {s.active_chats} чатов")
+        total_messages += s.total_messages
+        total_users += s.unique_users
+    lines.append(f"\n📌 *Итого за 7 дней:* {total_messages} сообщений, ~{total_users//7} пользователей в день")
+    top = get_top_users(5)
+    if top:
+        lines.append("\n🏆 *Топ-5 активных пользователей:*")
+        for i, u in enumerate(top, 1):
+            name = u['first_name'] or u['username'] or str(u['user_id'])
+            lines.append(f"{i}. {name} – {u['messages']} сообщений")
+    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+
+async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск музыки (заглушка)."""
+    if not context.args:
+        await update.message.reply_text("🎵 Использование: /music <название песни>")
+        return
+    query = " ".join(context.args)
+    status = await update.message.reply_text(f"🔍 Ищу: {query}...")
+    await asyncio.sleep(2)
+    await status.edit_text("🎵 Функция поиска музыки в разработке. Скоро появится!")
+
+# ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
+
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -1296,7 +1342,7 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ============== ОБРАБОТЧИК КНОПОК ГЛАВНОГО МЕНЮ ==============
+# ===== ОБРАБОТЧИК КНОПОК ГЛАВНОГО МЕНЮ =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1331,7 +1377,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin",
+            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
@@ -1361,8 +1407,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/delnote <id> — удалить заметку\n"
             "/broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
             "/admin — открыть админ-панель (только владелец)\n"
+            "/stats_detail — подробная статистика за 7 дней (только владелец)\n"
+            "/music — поиск музыки (в разработке)\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config) или 'все'\n"
+            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, training_data, deleted_messages, daily_stats, reaction_log) или 'все'\n"
             "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
             "Владельцу: «луна показать файл <путь>» — показать файл\n"
             "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
@@ -1403,7 +1451,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👑 Загружаю админ-панель...")
         await admin_command(update, context)
 
-# ============== ГЛАВНОЕ МЕНЮ ==============
+# ===== ГЛАВНОЕ МЕНЮ =====
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
@@ -1430,9 +1478,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
-# ============== ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ==============
+# ===== ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Отладочное логирование
     if update.message and update.message.text:
         logger.info(f"🔍 [DEBUG] Получен текст: {update.message.text} от {update.effective_user.id}")
     try:
@@ -1453,11 +1500,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # Модерация
         if await apply_moderation(update, context):
             return
 
-        # Сохраняем информацию о пользователе
         user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -1466,14 +1511,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             language_code=user.language_code
         )
 
-        # Обновляем статистику
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
-
-        # Сохраняем в историю чата
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # ===== 1. ОБРАБОТКА КОМАНДЫ "ЗАПОМНИ ИМЯ" =====
+        # ===== АВТОМАТИЧЕСКИЕ РЕАКЦИИ (только русские, группы) =====
+        if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and user_id != context.bot.id:
+            if re.search(r'[а-яА-Я]', text):
+                reaction = get_reaction_for_text(text)
+                if reaction:
+                    try:
+                        await context.bot.set_message_reaction(
+                            chat_id=chat_id,
+                            message_id=message.message_id,
+                            reaction=[reaction]
+                        )
+                    except Exception as e:
+                        logger.debug(f"Не удалось поставить реакцию: {e}")
+
+        # ===== 1. ЗАПОМНИ ИМЯ =====
         is_name_command = False
         custom_name = None
 
@@ -1542,7 +1598,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
                 table_name = match.group(1).lower()
-                valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config"]
+                valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "training_data", "deleted_messages", "daily_stats", "reaction_log"]
                 if table_name in ["все", "all", "всех"]:
                     cleared = []
                     for t in valid_tables:
@@ -1564,6 +1620,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
+            # GitHub поиск
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
                 query_text = match.group(1).strip()
@@ -1586,6 +1643,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
+            # Показать файл
             match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1615,6 +1673,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
                 return
 
+            # Объяснить файл
             match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1856,6 +1915,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
             logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
 
+        # ===== ОБУЧЕНИЕ: сохраняем пару (вопрос-ответ) для русских сообщений =====
+        if reply_text and re.search(r'[а-яА-Я]', text):
+            save_training_pair(text, reply_text, chat_id, user_id)
+
         add_to_user_memory(user_id, reply_text, "assistant")
         add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
 
@@ -1874,7 +1937,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ============== ЗАЯВКИ НА ВСТУПЛЕНИЕ ==============
+# ===== ЗАЯВКИ НА ВСТУПЛЕНИЕ =====
 async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     join_request = update.chat_join_request
     user = join_request.from_user
@@ -1910,14 +1973,13 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Ошибка отправки уведомления владельцу: {e}")
 
-# ============== ЗАПУСК ==============
+# ===== ЗАПУСК =====
 def main():
     init_db()
     logger.info("▶️ Инициализация приложения Luna AI...")
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # ConversationHandler для админ-панели
     admin_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("admin", admin_command),
@@ -1943,7 +2005,6 @@ def main():
 
     application.add_handler(admin_conv_handler)
 
-    # Команды
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset_command))
@@ -1955,6 +2016,8 @@ def main():
     application.add_handler(CommandHandler("warn", warn_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("stats_detail", stats_detail_command))
+    application.add_handler(CommandHandler("music", music_command))
     application.add_handler(CommandHandler("setmoderation", set_moderation_command))
     application.add_handler(CommandHandler("setmode", setmode_command))
     application.add_handler(CommandHandler("getmode", getmode_command))
@@ -1966,10 +2029,10 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # Обработчики сообщений и колбэков
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
+    application.add_handler(MessageHandler(filters.StatusUpdate.DELETE, deleted_message_handler))
 
     async def post_init(app: Application):
         global OWNER_NAME
@@ -1986,7 +2049,6 @@ def main():
         else:
             OWNER_NAME = None
 
-        # === ЗАГРУЗКА CHAT_ID ИЗ БД ===
         from database import get_all_chat_ids
         chat_ids = get_all_chat_ids()
         for cid in chat_ids:
@@ -2004,6 +2066,8 @@ def main():
             BotCommand("reset", "Сброс памяти и истории чата"),
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
+            BotCommand("stats_detail", "Подробная статистика (владелец)"),
+            BotCommand("music", "Поиск музыки (в разработке)"),
             BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
             BotCommand("setmode", "Глобальный режим (владелец)"),
@@ -2031,7 +2095,7 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с интерактивной админ-панелью!")
+    logger.info("🚀 Luna AI запущен с новыми функциями (обучение, аналитика, реакции, музыка)!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto (меняет владелец)")
     logger.info("📌 Бот отвечает на упоминания и слово 'луна' в группах")
 
