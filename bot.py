@@ -2032,7 +2032,6 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
-    application.add_handler(MessageHandler(filters.StatusUpdate.DELETE, deleted_message_handler))
 
     async def post_init(app: Application):
         global OWNER_NAME
