@@ -1,4 +1,5 @@
-# bot.py - Luna AI с новыми функциями (обучение, аналитика, реакции, музыка)
+# bot.py - Luna AI с Spotify API, админ-панелью, обучением, реакциями, аналитикой
+# ИСПРАВЛЕННАЯ ВЕРСИЯ - отправка аудио через Spotify + YouTube
 
 import os
 import asyncio
@@ -9,6 +10,8 @@ import aiohttp
 import io
 import requests
 import base64
+import tempfile
+import yt_dlp
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 import pytz
@@ -19,7 +22,7 @@ except ImportError:
     ZoneInfo = None
 
 from dotenv import load_dotenv
-from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReactionTypeEmoji
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -33,6 +36,10 @@ from telegram.ext import (
 from telegram.helpers import escape_markdown
 from cerebras.cloud.sdk import Cerebras
 from googleapiclient.discovery import build
+
+# Spotify
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 
 from database import (
     init_db,
@@ -87,6 +94,8 @@ WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден!")
@@ -106,10 +115,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# === Cerebras ===
 client = Cerebras(api_key=CEREBRAS_API_KEY)
 MODELS = ["gpt-oss-120b", "zai-glm-4.7"]
 logger.info(f"✅ Cerebras API настроен. Моделей: {len(MODELS)}")
 
+# === YouTube ===
 youtube = None
 if YOUTUBE_API_KEY:
     try:
@@ -118,6 +129,22 @@ if YOUTUBE_API_KEY:
     except Exception as e:
         logger.error(f"❌ Ошибка YouTube API: {e}")
 
+# === Spotify ===
+spotify = None
+if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+    try:
+        client_credentials_manager = SpotifyClientCredentials(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET
+        )
+        spotify = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+        logger.info("✅ Spotify API подключен")
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения Spotify: {e}")
+else:
+    logger.warning("⚠️ SPOTIFY_CLIENT_ID или SPOTIFY_CLIENT_SECRET не заданы")
+
+# === Хранилища ===
 chat_members: Dict[int, Set[int]] = {}
 user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
@@ -489,7 +516,7 @@ def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> Inlin
 async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
+        await update.effective_message.reply_text("⛔ Доступ запрещён.")
         return ConversationHandler.END
 
     context.user_data['admin_text'] = None
@@ -505,8 +532,9 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Текущий статус:"
     )
     status = "📝 Текст: не задан\n🖼️ Фото: нет"
-    await update.message.reply_text(
-        text + "\n\n" + status,
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=text + "\n\n" + status,
         reply_markup=get_admin_keyboard(False, False),
         parse_mode='Markdown'
     )
@@ -570,7 +598,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_photo(
                 photo=photo,
                 caption=preview_text,
-                parse_mode='Markdown'
+                parse_mode=None
             )
         else:
             await query.message.reply_text(preview_text, parse_mode='Markdown')
@@ -600,7 +628,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=cid,
                         photo=photo,
                         caption=text if text else None,
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 else:
                     await context.bot.send_message(
@@ -621,7 +649,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=OWNER_USER_ID,
                         photo=photo,
                         caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 else:
                     await context.bot.send_message(
@@ -740,6 +768,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greeting += (
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
+        "🎵 *Новое!* Spotify поиск и отправка музыки — команда /music <название>\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -766,6 +795,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
+        "• 🎵 Ищу и отправляю музыку через /music\n"
         "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music\n"
         "• Владельцу:\n"
         "   • 'луна очисти таблицу <имя>' – очистить таблицу\n"
@@ -775,7 +805,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим\n"
         "• /admin — открыть админ-панель для рассылки\n"
         "• /stats_detail — подробная статистика (владелец)\n"
-        "• /music — поиск музыки (в разработке)",
+        "• /music — поиск и отправка музыки",
         reply_markup=keyboard
     )
 
@@ -862,7 +892,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=cid,
                     photo=photo.file_id,
                     caption=text if text else None,
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             else:
                 await context.bot.send_message(
@@ -883,7 +913,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=OWNER_USER_ID,
                     photo=photo.file_id,
                     caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             else:
                 await context.bot.send_message(
@@ -904,7 +934,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== НОВЫЕ КОМАНДЫ =====
 
 async def stats_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Подробная статистика за 7 дней и топ пользователей (только владелец)."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец.")
@@ -930,18 +959,159 @@ async def stats_detail_command(update: Update, context: ContextTypes.DEFAULT_TYP
             lines.append(f"{i}. {name} – {u['messages']} сообщений")
     await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
 
+# === ИСПРАВЛЕННАЯ КОМАНДА MUSIC (отправка аудио) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск музыки (заглушка)."""
+    """Поиск музыки через Spotify + YouTube, отправка аудио."""
+    if not spotify:
+        await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
+        return
+
     if not context.args:
         await update.message.reply_text("🎵 Использование: /music <название песни>")
         return
+
     query = " ".join(context.args)
-    status = await update.message.reply_text(f"🔍 Ищу: {query}...")
-    await asyncio.sleep(2)
-    await status.edit_text("🎵 Функция поиска музыки в разработке. Скоро появится!")
+    status_msg = await update.message.reply_text(f"🔍 Ищу: {query}...")
+
+    try:
+        # 1. Поиск на Spotify
+        results = spotify.search(q=query, type='track', limit=1)
+        tracks = results.get('tracks', {}).get('items', [])
+
+        if not tracks:
+            await status_msg.edit_text(f"❌ Ничего не найдено на Spotify.")
+            return
+
+        track = tracks[0]
+        track_name = track['name']
+        artists = ', '.join([a['name'] for a in track['artists']])
+        spotify_url = track['external_urls']['spotify']
+        preview_url = track.get('preview_url')
+        duration_ms = track['duration_ms']
+        duration_sec = duration_ms // 1000
+
+        # Если длительность > 10 минут, не скачиваем
+        if duration_sec > 600:
+            await status_msg.edit_text(f"⏰ Трек слишком длинный ({duration_sec//60} мин). Отправляю ссылки.")
+            text = f"🎵 **{track_name}**\n👤 {artists}\n🔗 [Spotify]({spotify_url})"
+            if preview_url:
+                text += f"\n🎧 [Превью]({preview_url})"
+            await status_msg.edit_text(text, parse_mode='Markdown', disable_web_page_preview=True)
+            return
+
+        # 2. Поиск на YouTube через ytsearch1
+        yt_query = f"{track_name} {artists} official audio"
+        await status_msg.edit_text(f"🎬 Ищу на YouTube: {yt_query}...")
+
+        # Расширенные настройки yt-dlp для обхода блокировки
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'extractaudio': True,
+            'audioformat': 'mp3',
+            'outtmpl': '%(title)s.%(ext)s',
+            'noplaylist': True,
+            'default_search': 'ytsearch1',
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['hls', 'dash'],
+                }
+            },
+            'ignoreerrors': True,
+            'nooverwrites': True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Сначала получаем информацию без скачивания
+            info = ydl.extract_info(f"ytsearch1:{yt_query}", download=False)
+            entries = info.get('entries', [])
+            if not entries:
+                # Пробуем альтернативный запрос без "official audio"
+                alt_query = f"{track_name} {artists}"
+                info = ydl.extract_info(f"ytsearch1:{alt_query}", download=False)
+                entries = info.get('entries', [])
+                if not entries:
+                    await status_msg.edit_text("❌ Не найдено на YouTube.")
+                    return
+
+            video = entries[0]
+            video_url = video.get('webpage_url')
+            if not video_url:
+                await status_msg.edit_text("❌ Не удалось получить ссылку на видео.")
+                return
+
+            title = video.get('title', 'Неизвестно')
+            duration = video.get('duration', 0)
+
+            # Если видео длиннее 10 минут, отправляем ссылки
+            if duration and duration > 600:
+                await status_msg.edit_text(f"⏰ Видео слишком длинное ({duration//60} мин). Отправляю ссылки.")
+                text = f"🎵 **{track_name}**\n👤 {artists}\n🔗 [Spotify]({spotify_url})"
+                if preview_url:
+                    text += f"\n🎧 [Превью]({preview_url})"
+                text += f"\n🎬 [YouTube]({video_url})"
+                await status_msg.edit_text(text, parse_mode='Markdown', disable_web_page_preview=True)
+                return
+
+            # Скачиваем аудио
+            await status_msg.edit_text(f"⬇️ Скачиваю: {title[:50]}...")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                    try:
+                        ydl2.download([video_url])
+                    except yt_dlp.utils.DownloadError as e:
+                        logger.error(f"Ошибка скачивания: {e}")
+                        # Пробуем другой формат
+                        ydl_opts['format'] = 'bestaudio[ext=m4a]'
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl3:
+                            ydl3.download([video_url])
+
+                    # Находим скачанный файл
+                    audio_file = None
+                    for f in os.listdir(tmpdir):
+                        if f.endswith('.mp3') or f.endswith('.m4a'):
+                            audio_file = os.path.join(tmpdir, f)
+                            break
+                    if not audio_file:
+                        await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
+                        return
+
+                    # Отправляем аудио
+                    await status_msg.edit_text("📤 Отправляю аудио...")
+                    with open(audio_file, 'rb') as f:
+                        await context.bot.send_audio(
+                            chat_id=update.effective_chat.id,
+                            audio=f,
+                            title=track_name,
+                            performer=artists,
+                            duration=duration,
+                        )
+                    await status_msg.delete()
+
+    except yt_dlp.utils.DownloadError as e:
+        logger.error(f"Ошибка yt-dlp: {e}")
+        await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}\n\nВозможно, видео недоступно. Попробуйте другой запрос.")
+    except Exception as e:
+        logger.error(f"Ошибка музыки: {e}")
+        await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
-
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not context.args:
@@ -1342,12 +1512,72 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ===== ОБРАБОТЧИК КНОПОК ГЛАВНОГО МЕНЮ =====
+# ===== ОБРАБОТЧИК КНОПОК =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     data = query.data
+    logger.info(f"🔘 Нажата кнопка: {data}")
+
+    if data == "admin_panel":
+        await admin_panel(update, context)
+        return
+    elif data == "clear_table_menu":
+        await clear_table_menu(update, context)
+        return
+    elif data == "db_stats":
+        await db_stats(update, context)
+        return
+    elif data == "search_code":
+        await search_code_prompt(update, context)
+        return
+    elif data.startswith("clear_table_"):
+        table_name = data.replace("clear_table_", "")
+        if is_owner(user_id):
+            if clear_table(table_name):
+                await query.edit_message_text(f"✅ Таблица `{table_name}` очищена.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="clear_table_menu")]]), parse_mode='Markdown')
+            else:
+                await query.edit_message_text(f"❌ Ошибка очистки `{table_name}`.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="clear_table_menu")]]), parse_mode='Markdown')
+        else:
+            await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+
+    if data.startswith("approve_"):
+        parts = data.split("_")
+        if len(parts) == 3:
+            user_id_req = int(parts[1])
+            chat_id_req = int(parts[2])
+            try:
+                request_key = (user_id_req, chat_id_req)
+                if request_key in pending_requests:
+                    await pending_requests[request_key]['join_request'].approve()
+                    await query.edit_message_text("✅ Запрос одобрен")
+                    del pending_requests[request_key]
+                else:
+                    await context.bot.approve_chat_join_request(chat_id=chat_id_req, user_id=user_id_req)
+                    await query.edit_message_text("✅ Запрос одобрен (по ID)")
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка: {e}")
+        return
+
+    if data.startswith("decline_"):
+        parts = data.split("_")
+        if len(parts) == 3:
+            user_id_req = int(parts[1])
+            chat_id_req = int(parts[2])
+            try:
+                request_key = (user_id_req, chat_id_req)
+                if request_key in pending_requests:
+                    await pending_requests[request_key]['join_request'].decline()
+                    await query.edit_message_text("❌ Запрос отклонён")
+                    del pending_requests[request_key]
+                else:
+                    await context.bot.decline_chat_join_request(chat_id=chat_id_req, user_id=user_id_req)
+                    await query.edit_message_text("❌ Запрос отклонён (по ID)")
+            except Exception as e:
+                await query.edit_message_text(f"❌ Ошибка: {e}")
+        return
 
     if data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через /setcity", reply_markup=get_main_menu_keyboard())
@@ -1408,7 +1638,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
             "/admin — открыть админ-панель (только владелец)\n"
             "/stats_detail — подробная статистика за 7 дней (только владелец)\n"
-            "/music — поиск музыки (в разработке)\n"
+            "/music — поиск и отправка музыки\n"
             "Фраза «луна запомни <текст>» — сохранить заметку\n"
             "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, training_data, deleted_messages, daily_stats, reaction_log) или 'все'\n"
             "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
@@ -1447,9 +1677,79 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "auto": "🌀 Авто (адаптивный)"
         }
         await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
-    elif data == "admin_panel":
+    elif data == "open_admin_panel":
         await query.edit_message_text("👑 Загружаю админ-панель...")
         await admin_command(update, context)
+    else:
+        await query.edit_message_text("❌ Неизвестная команда")
+
+# ===== АДМИН-ПАНЕЛЬ (старая) =====
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    keyboard = [
+        [InlineKeyboardButton("🔍 Поиск в коде", callback_data="search_code")],
+        [InlineKeyboardButton("🧹 Очистить таблицу", callback_data="clear_table_menu")],
+        [InlineKeyboardButton("📊 Статистика БД", callback_data="db_stats")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
+    ]
+    await query.edit_message_text("👑 **Админ панель**\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def clear_table_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "training_data", "deleted_messages", "daily_stats", "reaction_log"]
+    keyboard = []
+    for t in tables:
+        keyboard.append([InlineKeyboardButton(f"🗑️ {t}", callback_data=f"clear_table_{t}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
+    await query.edit_message_text("🧹 **Выберите таблицу для очистки:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def db_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    session = get_session()
+    stats = {}
+    try:
+        stats["user_stats"] = session.query(UserStats).count()
+        stats["user_info"] = session.query(UserInfo).count()
+        stats["chat_memory"] = session.query(ChatMemory).count()
+        stats["violations"] = session.query(Violation).count()
+        stats["reminders"] = session.query(Reminder).count()
+        stats["notes"] = session.query(Note).count()
+        stats["config"] = session.query(Config).count()
+        stats["training_data"] = session.query(TrainingData).count()
+        stats["deleted_messages"] = session.query(DeletedMessage).count()
+        stats["daily_stats"] = session.query(DailyStats).count()
+        stats["reaction_log"] = session.query(ReactionLog).count()
+    finally:
+        session.close()
+    lines = ["📊 **Статистика базы данных:**"]
+    for table, count in stats.items():
+        lines.append(f"• `{table}`: {count} записей")
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def search_code_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_owner(update.effective_user.id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]
+    await query.edit_message_text(
+        "🔍 **Поиск в коде**\n\n"
+        "Напишите текст для поиска в репозитории.\n"
+        "Используйте команду: `луна искать в коде <текст>`\n"
+        "Или просто отправьте текст, и я поищу.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
 # ===== ГЛАВНОЕ МЕНЮ =====
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -1471,14 +1771,15 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⚙️ Режимы", callback_data="modes"),
         ],
         [
+            InlineKeyboardButton("🎵 Spotify", callback_data="music"),
             InlineKeyboardButton("❓ Помощь", callback_data="help"),
         ],
     ]
     if OWNER_USER_ID and is_owner(OWNER_USER_ID):
-        keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="admin_panel")])
+        keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="open_admin_panel")])
     return InlineKeyboardMarkup(keyboard)
 
-# ===== ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ =====
+# ===== ОСНОВНАЯ ЛОГИКА =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.text:
         logger.info(f"🔍 [DEBUG] Получен текст: {update.message.text} от {update.effective_user.id}")
@@ -1515,7 +1816,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # ===== АВТОМАТИЧЕСКИЕ РЕАКЦИИ (только русские, группы) =====
+        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (только русские, группы) ===
         if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and user_id != context.bot.id:
             if re.search(r'[а-яА-Я]', text):
                 reaction = get_reaction_for_text(text)
@@ -1524,10 +1825,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.set_message_reaction(
                             chat_id=chat_id,
                             message_id=message.message_id,
-                            reaction=[reaction]
+                            reaction=[ReactionTypeEmoji(emoji=reaction)]
                         )
                     except Exception as e:
-                        logger.debug(f"Не удалось поставить реакцию: {e}")
+                        logger.warning(f"Не удалось поставить реакцию: {e}")
 
         # ===== 1. ЗАПОМНИ ИМЯ =====
         is_name_command = False
@@ -1620,7 +1921,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 return
 
-            # GitHub поиск
             match = re.search(r'^луна\s+искать\s+в\s+коде\s+(.+)', text_lower)
             if match:
                 query_text = match.group(1).strip()
@@ -1643,7 +1943,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
                 return
 
-            # Показать файл
             match = re.search(r'^луна\s+показать\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1673,7 +1972,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_msg.edit_text(f"📄 **Файл:** `{file_path}`\n```\n{content}\n```", parse_mode='Markdown')
                 return
 
-            # Объяснить файл
             match = re.search(r'^луна\s+объясни\s+файл\s+(.+)', text_lower)
             if match:
                 file_path = match.group(1).strip()
@@ -1915,7 +2213,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
             logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
 
-        # ===== ОБУЧЕНИЕ: сохраняем пару (вопрос-ответ) для русских сообщений =====
+        # === ОБУЧЕНИЕ: сохраняем пару (вопрос-ответ) для русских сообщений ===
         if reply_text and re.search(r'[а-яА-Я]', text):
             save_training_pair(text, reply_text, chat_id, user_id)
 
@@ -2066,7 +2364,7 @@ def main():
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("stats_detail", "Подробная статистика (владелец)"),
-            BotCommand("music", "Поиск музыки (в разработке)"),
+            BotCommand("music", "Поиск и отправка музыки"),
             BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
             BotCommand("setmode", "Глобальный режим (владелец)"),
@@ -2094,8 +2392,14 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с новыми функциями (обучение, аналитика, реакции, музыка)!")
+    logger.info("🚀 Luna AI запущен на Cerebras API с Spotify интеграцией!")
+    logger.info("⚡ Скорость: ~2,000 токенов/сек")
+    logger.info("🧠 Модели: GPT-OSS-120B, Z.ai GLM 4.7")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto (меняет владелец)")
+    logger.info("🧘 Анализ эмоций включён")
+    logger.info("📝 Напоминания активны")
+    logger.info("🛡️ Модерация: автоматическая + ручная (владелец исключён)")
+    logger.info("🎵 Spotify API: подключен" if spotify else "🎵 Spotify API: не подключен")
     logger.info("📌 Бот отвечает на упоминания и слово 'луна' в группах")
 
     application.run_polling(
