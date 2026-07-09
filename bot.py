@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4), выбором музыки, админ-панелью и всеми функциями
-# Увеличенные таймауты, обработка больших файлов
+# bot.py - Luna AI с трейлерами (MP4), выбором музыки (MP3), админ-панелью и всеми функциями
+# Увеличенные таймауты, обработка больших файлов, обход капчи YouTube
 
 import os
 import asyncio
@@ -767,7 +767,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
-        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название>\n\n"
+        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю MP3)\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -988,7 +988,6 @@ async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text(f"❌ Трейлеры к '{query}' не найдены.")
             return
 
-        # Сохраняем список видео в user_data для обработки выбора
         context.user_data['trailer_videos'] = items
 
         lines = [f"🎬 *Трейлеры к '{query}':*\n"]
@@ -1048,8 +1047,8 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
+                'skip': ['webpage', 'hls', 'dash'],   # обход капчи
+                'player_client': ['android'],
             }
         },
         'ignoreerrors': True,
@@ -1060,7 +1059,6 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Используем фиксированный префикс
             ydl_opts['outtmpl'] = os.path.join(tmpdir, 'trailer.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
@@ -1073,7 +1071,6 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем файл по префиксу
                 video_file = None
                 for f in os.listdir(tmpdir):
                     if f.startswith('trailer.'):
@@ -1114,7 +1111,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео) ===
+# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео, конвертация в MP3) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки через Spotify с выбором трека."""
     if not spotify:
@@ -1185,7 +1182,6 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
     track_name = track['name']
     artists = ', '.join([a['name'] for a in track['artists']])
 
-    # Ищем видео на YouTube
     search_query = f"{track_name} {artists} official audio"
     status_msg = await query.edit_message_text(f"🔍 Ищу на YouTube: {search_query}...")
 
@@ -1208,7 +1204,6 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await status_msg.edit_text(f"❌ Не найдено видео на YouTube для '{track_name}'.")
             return
 
-        # Сохраняем видео для последующего скачивания
         context.user_data['music_youtube_videos'] = items
         context.user_data['music_track_name'] = track_name
         context.user_data['music_artists'] = artists
@@ -1223,7 +1218,6 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
             lines.append(f"{i}. {title} (канал: {channel})")
             keyboard.append([InlineKeyboardButton(f"▶️ {i}", callback_data=f"music_yt_select_{i-1}")])
 
-        # Кнопка отмены
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="music_cancel")])
 
         text = "\n".join(lines)
@@ -1237,9 +1231,9 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         logger.error(f"Ошибка поиска YouTube для музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио в MP3) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио выбранного видео с YouTube и отправляет."""
+    """Скачивает аудио выбранного видео с YouTube и отправляет в MP3."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1267,23 +1261,26 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     artists = context.user_data.get('music_artists', '')
     duration = context.user_data.get('music_duration', 0)
 
-    status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
+    status_msg = await query.edit_message_text(f"⬇️ Скачиваю и конвертирую в MP3: {title}...")
 
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio',
+        'format': 'bestaudio',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'extractaudio': True,
-        'audioformat': 'm4a',
         'noplaylist': True,
         'headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
-                'skip': ['hls', 'dash'],
+                'skip': ['webpage', 'hls', 'dash'],
+                'player_client': ['android'],
             }
         },
         'ignoreerrors': True,
@@ -1306,7 +1303,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем файл по префиксу
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     if f.startswith('music.'):
@@ -2623,8 +2619,8 @@ def main():
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("stats_detail", "Подробная статистика (владелец)"),
-            BotCommand("music", "Поиск и выбор музыки"),
-            BotCommand("trailer", "Поиск и скачивание трейлеров"),
+            BotCommand("music", "Поиск и выбор музыки (MP3)"),
+            BotCommand("trailer", "Поиск и скачивание трейлеров (MP4)"),
             BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
             BotCommand("setmode", "Глобальный режим (владелец)"),
@@ -2652,7 +2648,7 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и улучшенной музыкой!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (MP3)!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
