@@ -1037,7 +1037,6 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю трейлер: {title}...")
 
-    # Настройки yt-dlp для MP4 (высокое качество, но с ограничением размера)
     ydl_opts = {
         'format': 'best[ext=mp4][filesize<50M]/best[ext=mp4]',
         'outtmpl': '%(title)s.%(ext)s',
@@ -1055,15 +1054,15 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         },
         'ignoreerrors': True,
         'nooverwrites': True,
-        'timeout': 120,          # увеличенный таймаут
+        'timeout': 120,
         'socket_timeout': 120,
     }
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
+            # Используем фиксированный префикс
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, 'trailer.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Запускаем скачивание с увеличенным таймаутом
                 download_task = asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: ydl.download([video_url])
@@ -1074,19 +1073,20 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Находим скачанный файл
+                # Ищем файл по префиксу
                 video_file = None
                 for f in os.listdir(tmpdir):
-                    if f.endswith('.mp4'):
+                    if f.startswith('trailer.'):
                         video_file = os.path.join(tmpdir, f)
                         break
+
                 if not video_file:
+                    logger.error(f"Файлы в tmpdir: {os.listdir(tmpdir)}")
                     await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
                     return
 
-                # Проверяем размер файла
                 file_size = os.path.getsize(video_file)
-                if file_size > 49 * 1024 * 1024:  # 49 МБ
+                if file_size > 49 * 1024 * 1024:
                     await status_msg.edit_text(
                         f"📹 *Трейлер:* {title}\n\n"
                         f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ). Telegram принимает до 50 МБ.\n"
@@ -1096,7 +1096,6 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                     )
                     return
 
-                # Отправляем видео
                 await status_msg.edit_text("📤 Отправляю видео...")
                 with open(video_file, 'rb') as f:
                     await context.bot.send_video(
@@ -1295,7 +1294,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, 'music.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
                     None,
@@ -1307,12 +1306,15 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
+                # Ищем файл по префиксу
                 audio_file = None
                 for f in os.listdir(tmpdir):
-                    if f.endswith('.m4a') or f.endswith('.mp4') or f.endswith('.webm') or f.endswith('.opus'):
+                    if f.startswith('music.'):
                         audio_file = os.path.join(tmpdir, f)
                         break
+
                 if not audio_file:
+                    logger.error(f"Файлы в tmpdir: {os.listdir(tmpdir)}")
                     await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
                     return
 
@@ -2576,7 +2578,7 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # ❗ ВАЖНО: специфичные обработчики для трейлеров и музыки ДО общего button_callback
+    # ❗ Специфичные обработчики ДО общего button_callback
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
     application.add_handler(CallbackQueryHandler(music_select_callback, pattern="^music_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
