@@ -1264,8 +1264,8 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
     ydl_opts = {
-        'format': 'bestaudio',  # скачиваем лучший доступный аудиоформат
-        'outtmpl': '%(title)s.%(ext)s',
+        'format': 'bestaudio',
+        'outtmpl': '%(title)s.%(ext)s',  # временно используем оригинальное имя
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -1286,7 +1286,8 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts['outtmpl'] = os.path.join(tmpdir, 'music.%(ext)s')
+            # Сохраняем с оригинальным названием, чтобы не терять расширение
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
                     None,
@@ -1298,10 +1299,12 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
+                # Ищем любой файл в tmpdir (не папку) с размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
-                    if f.startswith('music.'):
-                        audio_file = os.path.join(tmpdir, f)
+                    full_path = os.path.join(tmpdir, f)
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                        audio_file = full_path
                         break
 
                 if not audio_file:
@@ -1337,7 +1340,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
-
 # === ОБРАБОТЧИК ОТМЕНЫ ДЛЯ МУЗЫКИ ===
 async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
