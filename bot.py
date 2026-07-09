@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Увеличенные таймауты, обход капчи YouTube
+# bot.py - Luna AI с трейлерами (MP4), музыкой (аудио), админ-панелью
+# Убрана история чата, обучение, лишние таблицы. Ответы короткие и без смайликов.
 
 import os
 import asyncio
@@ -48,9 +48,6 @@ from database import (
     set_global_mode,
     update_user_stats,
     get_user_stats,
-    add_chat_memory,
-    get_chat_memory,
-    clear_chat_memory,
     get_violations,
     update_violation,
     clear_violation,
@@ -64,27 +61,14 @@ from database import (
     get_notes,
     delete_note,
     clear_table,
-    get_user_history,
     get_session,
     UserStats,
     UserInfo,
-    ChatMemory,
     Violation,
     Reminder,
     Note,
     Config,
-    TrainingData,
-    DeletedMessage,
-    DailyStats,
-    ReactionLog,
-    save_training_pair,
-    find_training_answer,
-    log_deleted_message,
-    update_daily_stats,
-    get_detailed_stats,
-    get_top_users,
     get_reaction_for_text,
-    search_music,
 )
 
 load_dotenv()
@@ -149,8 +133,6 @@ else:
 chat_members: Dict[int, Set[int]] = {}
 user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
-user_memory: Dict[int, List[Dict]] = {}
-MAX_MEMORY = 50
 
 WAITING_TEXT, WAITING_PHOTO, CONFIRM = range(3)
 
@@ -198,47 +180,6 @@ def add_chat_member(chat_id: int, user_id: int, user_name: str):
     members.add(user_id)
     if user_id not in user_names:
         user_names[user_id] = user_name
-
-def get_user_memory(user_id: int) -> List[Dict]:
-    if user_id not in user_memory:
-        user_memory[user_id] = []
-    return user_memory[user_id]
-
-def add_to_user_memory(user_id: int, text: str, role: str = "user"):
-    memory = get_user_memory(user_id)
-    memory.append({"role": role, "text": text})
-    if len(memory) > MAX_MEMORY:
-        memory.pop(0)
-
-def clear_memory(user_id: int, chat_id: int = None):
-    if user_id in user_memory:
-        user_memory[user_id] = []
-    if chat_id and chat_id < 0:
-        clear_chat_memory(chat_id)
-
-def build_context(chat_id: int, user_id: int, user_name: str, custom_name: str = None) -> str:
-    user_history = get_user_history(user_id, limit=30)
-    user_hist = get_user_memory(user_id)
-    members = get_chat_members(chat_id)
-    parts = []
-    if custom_name:
-        parts.append(f"=== Твоё имя: {custom_name} ===")
-        parts.append("Обращайся к пользователю по этому имени.")
-    if user_history:
-        parts.append("=== История твоих сообщений (из БД) ===")
-        for msg in user_history:
-            parts.append(f"{msg['user_name']}: {msg['text']}")
-        parts.append("")
-    if user_hist:
-        parts.append("=== Твоя краткосрочная память ===")
-        for msg in user_hist[-5:]:
-            role = "Ты" if msg["role"] == "user" else "Я"
-            parts.append(f"{role}: {msg['text']}")
-        parts.append("")
-    parts.append(f"=== Информация ===")
-    parts.append(f"Участников: {len(members)}")
-    parts.append(f"Пользователь: {user_name}")
-    return "\n".join(parts)
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
     if OWNER_USER_ID:
@@ -759,25 +700,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         language_code=user.language_code
     )
     custom_name = user_info.get('custom_name') if user_info else None
-    greeting = f"🌙 Привет! Я Luna AI — самый быстрый AI-ассистент.\n"
+    greeting = "Привет! Я Luna AI.\n"
     if custom_name:
-        greeting += f"Рада снова видеть тебя, {custom_name}! "
+        greeting += f"Рада видеть тебя, {custom_name}!\n"
     else:
-        greeting += "Ты можешь сказать «луна запомни моё имя <имя>», чтобы я обращалась к тебе по имени.\n"
+        greeting += "Скажи «луна запомни моё имя Имя», чтобы я обращалась к тебе по имени.\n"
     greeting += (
-        "Умею анализировать эмоции, давать погоду, напоминать,\n"
-        "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
-        "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
-        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n\n"
-        "Мои команды:\n"
-        "/setcity <город> – указать свой город\n"
-        "/settimezone <таймзона> – указать часовой пояс\n"
-        "/weather – погода (если город задан)\n"
-        "Скажи «луна запомни <текст>» – я сохраню заметку.\n"
-        "/notes – показать последние заметки\n"
-        "/reset – очистить историю чата (в БД)\n"
-        "/admin – админ-панель (только для владельца)\n\n"
-        "Нажми на кнопки ниже, чтобы попробовать:"
+        "Мои возможности:\n"
+        "/trailer Название – скачать трейлер в MP4\n"
+        "/music Название – скачать аудио\n"
+        "/weather Город – погода\n"
+        "/imagine Описание – генерация картинки\n"
+        "/wiki Запрос – Википедия\n"
+        "/remind 5м текст – напоминание\n"
+        "«луна запомни текст» – сохранить заметку\n"
+        "/notes – показать заметки\n"
+        "/reset – очистить мою память о вас\n"
+        "Спрашивайте о чём угодно – я постараюсь ответить кратко и по делу."
     )
     await update.message.reply_text(greeting, reply_markup=get_main_menu_keyboard())
 
@@ -789,25 +728,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🌙 Luna AI на Cerebras.\n"
         "• Отвечаю, когда упоминают @bot или пишут 'луна'\n"
-        "• Помню контекст чата (только твои сообщения)\n"
+        "• Не запоминаю историю чата – каждый вопрос обрабатываю отдельно.\n"
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
-        "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
-        "• 🎵 Поиск музыки с выбором через /music\n"
-        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music, /trailer\n"
-        "• Владельцу:\n"
-        "   • 'луна очисти таблицу <имя>' – очистить таблицу\n"
-        "   • 'луна искать в коде <текст>' – поиск в GitHub\n"
-        "   • 'луна показать файл <путь>' – показать файл\n"
-        "   • 'луна объясни файл <путь>' – AI-объяснение файла\n"
-        "• /setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим\n"
-        "• /admin — открыть админ-панель для рассылки\n"
-        "• /stats_detail — подробная статистика (владелец)\n"
-        "• /music — поиск и выбор музыки\n"
-        "• /trailer — поиск и скачивание трейлеров",
+        "• 🎬 Трейлеры: /trailer\n"
+        "• 🎵 Музыка: /music\n"
+        "• Команды: /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail\n"
+        "• Владельцу: 'луна очисти таблицу <имя>' – очистить таблицу\n"
+        "• /setmode fast|smart|sarcastic|flirt|auto – глобальный режим\n"
+        "• /admin – админ-панель для рассылки",
         reply_markup=keyboard
     )
 
@@ -933,40 +865,18 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Ошибок: {errors}"
     )
 
-# ===== НОВЫЕ КОМАНДЫ =====
 async def stats_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец.")
         return
-    update_daily_stats()
-    stats = get_detailed_stats(7)
-    if not stats:
-        await update.message.reply_text("📊 Статистика пока пуста.")
-        return
-    lines = ["📊 *Статистика за последние 7 дней:*"]
-    total_messages = 0
-    total_users = 0
-    for s in stats:
-        lines.append(f"📅 {s.date.strftime('%Y-%m-%d')}: {s.total_messages} сообщений, {s.unique_users} пользователей, {s.active_chats} чатов")
-        total_messages += s.total_messages
-        total_users += s.unique_users
-    lines.append(f"\n📌 *Итого за 7 дней:* {total_messages} сообщений, ~{total_users//7} пользователей в день")
-    top = get_top_users(5)
-    if top:
-        lines.append("\n🏆 *Топ-5 активных пользователей:*")
-        for i, u in enumerate(top, 1):
-            name = u['first_name'] or u['username'] or str(u['user_id'])
-            lines.append(f"{i}. {name} – {u['messages']} сообщений")
-    await update.message.reply_text("\n".join(lines), parse_mode='Markdown')
+    await update.message.reply_text("📊 Статистика пока отключена (таблицы удалены).")
 
-# === КОМАНДА ТРЕЙЛЕРОВ (скачивание MP4) ===
+# === КОМАНДА ТРЕЙЛЕРОВ ===
 async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск трейлеров фильмов на YouTube и скачивание MP4."""
     if not youtube:
-        await update.message.reply_text("❌ YouTube API не настроен. Добавьте YOUTUBE_API_KEY в .env")
+        await update.message.reply_text("❌ YouTube API не настроен.")
         return
-
     if not context.args:
         await update.message.reply_text("🎬 Использование: /trailer <название фильма>")
         return
@@ -984,13 +894,11 @@ async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         response = request.execute()
         items = response.get("items", [])
-
         if not items:
             await status_msg.edit_text(f"❌ Трейлеры к '{query}' не найдены.")
             return
 
         context.user_data['trailer_videos'] = items
-
         lines = [f"🎬 *Трейлеры к '{query}':*\n"]
         keyboard = []
         for i, item in enumerate(items, 1):
@@ -998,20 +906,16 @@ async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"{i}. {title}")
             keyboard.append([InlineKeyboardButton(f"▶️ {i}", callback_data=f"trailer_select_{i-1}")])
 
-        text = "\n".join(lines)
         await status_msg.edit_text(
-            text,
+            "\n".join(lines),
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
     except Exception as e:
         logger.error(f"Ошибка поиска трейлеров: {e}")
-        await status_msg.edit_text("⚠️ Ошибка при поиске трейлеров. Попробуйте позже.")
+        await status_msg.edit_text("⚠️ Ошибка при поиске трейлеров.")
 
-# === ОБРАБОТЧИК ВЫБОРА ТРЕЙЛЕРА (скачивание MP4) ===
 async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает выбранный трейлер в MP4 и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1069,7 +973,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                 try:
                     await asyncio.wait_for(download_task, timeout=120)
                 except asyncio.TimeoutError:
-                    await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
+                    await status_msg.edit_text("⏰ Скачивание заняло слишком много времени.")
                     return
 
                 video_file = None
@@ -1087,7 +991,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                 if file_size > 49 * 1024 * 1024:
                     await status_msg.edit_text(
                         f"📹 *Трейлер:* {title}\n\n"
-                        f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ). Telegram принимает до 50 МБ.\n"
+                        f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ).\n"
                         f"🔗 [Смотреть на YouTube]({video_url})",
                         parse_mode='Markdown',
                         disable_web_page_preview=True
@@ -1107,18 +1011,16 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Ошибка скачивания трейлера: {e}")
-        await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}\n\nПопробуйте другой трейлер.")
+        await status_msg.edit_text(f"❌ Ошибка: {e}\n\nПопробуйте другой трейлер.")
     except Exception as e:
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио с извлечением из видео) ===
+# === КОМАНДА МУЗЫКИ ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск музыки через Spotify, берём первый трек, ищем на YouTube."""
     if not spotify:
-        await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
+        await update.message.reply_text("❌ Spotify API не настроен.")
         return
-
     if not context.args:
         await update.message.reply_text("🎵 Использование: /music <название песни>")
         return
@@ -1129,9 +1031,8 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         results = spotify.search(q=query, type='track', limit=1)
         tracks = results.get('tracks', {}).get('items', [])
-
         if not tracks:
-            await status_msg.edit_text(f"❌ Ничего не найдено на Spotify.")
+            await status_msg.edit_text("❌ Ничего не найдено на Spotify.")
             return
 
         track = tracks[0]
@@ -1161,7 +1062,6 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         response = request.execute()
         items = response.get("items", [])
-
         if not items:
             await status_msg.edit_text(f"❌ Не найдено видео на YouTube для '{track_name}'.")
             return
@@ -1178,9 +1078,8 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="music_cancel")])
 
-        text = "\n".join(lines)
         await status_msg.edit_text(
-            text,
+            "\n".join(lines),
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1189,9 +1088,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание видео и извлечение аудио) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает видео, извлекает аудио и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1221,18 +1118,8 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
-    # Проверяем наличие ffmpeg
-    ffmpeg_available = shutil.which('ffmpeg') is not None
-    if not ffmpeg_available:
-        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
-
     ydl_opts = {
-        'format': 'bestaudio/best',  # скачиваем лучшее аудио, если нет — видео
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }] if ffmpeg_available else [],
+        'format': 'bestaudio',
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
@@ -1242,10 +1129,12 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         },
         'extractor_args': {
             'youtube': {
-                'skip': ['webpage', 'hls', 'dash'],
-                'player_client': ['android', 'web'],
+                'skip': ['webpage', 'dash', 'hls'],
+                'player_client': ['android'],
             }
         },
+        'geo_bypass': True,
+        'geo_bypass_country': 'US',
         'ignoreerrors': True,
         'nooverwrites': True,
         'timeout': 120,
@@ -1263,10 +1152,9 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                 try:
                     await asyncio.wait_for(download_task, timeout=120)
                 except asyncio.TimeoutError:
-                    await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
+                    await status_msg.edit_text("⏰ Скачивание заняло слишком много времени.")
                     return
 
-                # Ищем любой файл (не папку) размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1284,7 +1172,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     spotify_url = context.user_data.get('music_spotify_url', '')
                     await status_msg.edit_text(
                         f"🎵 **{track_name}** — {artists}\n\n"
-                        f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ). Telegram принимает до 50 МБ.\n"
+                        f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ).\n"
                         f"🔗 [Слушать на Spotify]({spotify_url})",
                         parse_mode='Markdown'
                     )
@@ -1308,7 +1196,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ОТМЕНЫ ДЛЯ МУЗЫКИ ===
 async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1339,7 +1226,7 @@ async def settimezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             await update.message.reply_text("❌ Ошибка сохранения часового пояса.")
     else:
-        await update.message.reply_text(f"❌ Таймзона '{tz}' не распознана. Используйте формат UTC+5, UTC-3, Asia/Tashkent, Europe/Moscow и т.д.")
+        await update.message.reply_text(f"❌ Таймзона '{tz}' не распознана.")
 
 async def notes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1366,7 +1253,7 @@ async def delnote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if delete_note(note_id):
         await update.message.reply_text("✅ Заметка удалена.")
     else:
-        await update.message.reply_text("❌ Не удалось удалить заметку (возможно, она не ваша или уже удалена).")
+        await update.message.reply_text("❌ Не удалось удалить заметку.")
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     effective_message = update.effective_message
@@ -1419,7 +1306,7 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
     except Exception as e:
         logger.error(f"Ошибка погоды: {e}")
-        await effective_message.reply_text("⚠️ Не удалось получить погоду. Попробуйте позже.")
+        await effective_message.reply_text("⚠️ Не удалось получить погоду.")
 
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     effective_message = update.effective_message
@@ -1461,7 +1348,7 @@ async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if effective_message is None:
         return
     if not youtube:
-        await effective_message.reply_text("❌ YouTube API не настроен. Добавьте YOUTUBE_API_KEY в .env")
+        await effective_message.reply_text("❌ YouTube API не настроен.")
         return
     if not context.args:
         await effective_message.reply_text(
@@ -1499,7 +1386,7 @@ async def yt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(text, parse_mode='Markdown', disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Ошибка YouTube API: {e}")
-        await status_msg.edit_text("⚠️ Ошибка поиска на YouTube. Попробуйте позже.")
+        await status_msg.edit_text("⚠️ Ошибка поиска на YouTube.")
 
 async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1538,28 +1425,21 @@ async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    clear_memory(user_id, chat_id)
-    await update.message.reply_text("🧹 Память и история чата очищены (в БД).")
+    # Очищаем только имя в БД, т.к. памяти нет
+    await update.message.reply_text("🧹 Я не храню историю сообщений, но я забыла ваше имя, если вы его сохраняли. Можете задать заново через 'луна запомни моё имя'.")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    session = get_session()
-    try:
-        count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
-    finally:
-        session.close()
     members = get_chat_members(chat_id)
     await update.message.reply_text(
         f"📊 Статистика чата:\n"
         f"• Участников: {len(members)}\n"
-        f"• Сообщений в истории (БД): {count}"
     )
 
 async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await update.message.reply_text("⛔ Только владелец может использовать эту команду.")
+        await update.message.reply_text("⛔ Только владелец.")
         return
     target_user_id = None
     target_user_name = None
@@ -1573,23 +1453,13 @@ async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = context.args[0]
         if target.startswith('@'):
             try:
-                members = await context.bot.get_chat_administrators(update.effective_chat.id)
-                for member in members:
+                async for member in context.bot.get_chat_members(update.effective_chat.id):
                     if member.user.username and member.user.username.lower() == target[1:].lower():
                         target_user_id = member.user.id
                         target_user_name = member.user.first_name or "Пользователь"
                         break
             except:
                 pass
-            if not target_user_id:
-                try:
-                    async for member in context.bot.get_chat_members(update.effective_chat.id):
-                        if member.user.username and member.user.username.lower() == target[1:].lower():
-                            target_user_id = member.user.id
-                            target_user_name = member.user.first_name or "Пользователь"
-                            break
-                except:
-                    pass
         else:
             try:
                 target_user_id = int(target)
@@ -1715,13 +1585,12 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ===== ОБРАБОТЧИК КНОПОК ГЛАВНОГО МЕНЮ =====
+# ===== КНОПКИ ГЛАВНОГО МЕНЮ =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     data = query.data
-    logger.info(f"🔘 Нажата кнопка: {data}")
 
     if data == "admin_panel":
         await admin_panel(update, context)
@@ -1783,89 +1652,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "weather":
-        await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через /setcity", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🌍 Напиши /weather <город>", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
-        await query.edit_message_text("🎨 Напиши /imagine <описание>, например: /imagine кот в шляпе на луне", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎨 Напиши /imagine <описание>", reply_markup=get_main_menu_keyboard())
     elif data == "yt":
-        await query.edit_message_text("🎬 Напиши /yt <запрос>, например: /yt нейросети 2026", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎬 Напиши /yt <запрос>", reply_markup=get_main_menu_keyboard())
     elif data == "wiki":
-        await query.edit_message_text("📖 Напиши /wiki <запрос>, например: /wiki Эйфелева башня", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("📖 Напиши /wiki <запрос>", reply_markup=get_main_menu_keyboard())
     elif data == "stats":
         chat_id = update.effective_chat.id
         members = get_chat_members(chat_id)
-        session = get_session()
-        try:
-            count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
-        finally:
-            session.close()
         await query.edit_message_text(
-            f"📊 Статистика чата:\n"
-            f"• Участников: {len(members)}\n"
-            f"• Сообщений в истории (БД): {count}",
+            f"📊 Статистика чата:\n• Участников: {len(members)}",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "reset":
-        chat_id = update.effective_chat.id
-        clear_memory(user_id, chat_id)
-        await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🧹 Я не храню историю сообщений, но забыла ваше имя, если оно было сохранено.", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music, /trailer",
+            "📋 Команды: /start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music, /trailer",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
         await query.edit_message_text("🔙 Главное меню", reply_markup=get_main_menu_keyboard())
     elif data == "all_commands":
         await query.edit_message_text(
-            "📋 Полный список:\n"
-            "/start — меню\n"
-            "/help — помощь\n"
-            "/weather <город> — погода\n"
-            "/imagine <описание> — генерация картинки\n"
-            "/yt <запрос> — поиск на YouTube\n"
-            "/remind — напоминание\n"
-            "/reset — сброс памяти и истории чата\n"
-            "/members — участники\n"
-            "/warn — предупреждение/бан (поддерживает reply)\n"
-            "/unban — разбан (поддерживает reply)\n"
-            "/setmoderation on/off — авто-модерация (только владелец)\n"
-            "/setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим (только владелец)\n"
-            "   auto — бот сам выбирает тон (сарказм/серьёзно)\n"
-            "/getmode — показать текущий режим\n"
-            "/wiki <запрос> — поиск в Википедии\n"
-            "/owners — показать владельца\n"
-            "/setcity <город> — установить город\n"
-            "/settimezone <таймзона> — установить часовой пояс\n"
-            "/notes — показать заметки\n"
-            "/delnote <id> — удалить заметку\n"
-            "/broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
-            "/admin — открыть админ-панель (только владелец)\n"
-            "/stats_detail — подробная статистика за 7 дней (только владелец)\n"
-            "/music — поиск и выбор музыки\n"
-            "/trailer — поиск и скачивание трейлеров\n"
-            "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, training_data, deleted_messages, daily_stats, reaction_log) или 'все'\n"
-            "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
-            "Владельцу: «луна показать файл <путь>» — показать файл\n"
-            "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
+            "📋 Полный список:\n/start – меню\n/help – помощь\n/weather – погода\n/imagine – картинка\n/yt – YouTube\n/remind – напоминание\n/reset – сброс памяти\n/members – участники\n/warn – предупреждение\n/unban – разбан\n/setmoderation – модерация\n/setmode – режим\n/getmode – текущий режим\n/wiki – Википедия\n/owners – владелец\n/setcity – город\n/settimezone – таймзона\n/notes – заметки\n/delnote – удалить заметку\n/broadcast – рассылка\n/admin – админ-панель\n/stats_detail – статистика\n/music – музыка\n/trailer – трейлеры",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
         if not is_owner(user_id):
-            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text("⛔ Только владелец.", reply_markup=get_main_menu_keyboard())
             return
         keyboard = [
             [InlineKeyboardButton("⚡ Быстрый", callback_data="setmode_fast")],
             [InlineKeyboardButton("🧠 Умный", callback_data="setmode_smart")],
             [InlineKeyboardButton("😈 Саркастичный", callback_data="setmode_sarcastic")],
             [InlineKeyboardButton("🔞 Флирт", callback_data="setmode_flirt")],
-            [InlineKeyboardButton("🌀 Авто (сам выберу тон)", callback_data="setmode_auto")],
+            [InlineKeyboardButton("🌀 Авто", callback_data="setmode_auto")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Выбери глобальный режим ответа:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("setmode_"):
         if not is_owner(user_id):
-            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text("⛔ Только владелец.", reply_markup=get_main_menu_keyboard())
             return
         mode = data.replace("setmode_", "")
         valid_modes = ["fast", "smart", "sarcastic", "flirt", "auto"]
@@ -1878,16 +1708,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "smart": "🧠 Умный",
             "sarcastic": "😈 Саркастичный",
             "flirt": "🔞 Флирт",
-            "auto": "🌀 Авто (адаптивный)"
+            "auto": "🌀 Авто"
         }
-        await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text(f"✅ Режим установлен: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
     elif data == "open_admin_panel":
         await query.edit_message_text("👑 Загружаю админ-панель...")
         await admin_command(update, context)
     elif data == "music":
-        await query.edit_message_text("🎵 Напиши /music <название песни>\nПример: /music Imagine Dragons Radioactive", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
-        await query.edit_message_text("🎬 Напиши /trailer <название фильма>\nПример: /trailer Аватар", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
     else:
         await query.edit_message_text("❌ Неизвестная команда")
 
@@ -1910,7 +1740,7 @@ async def clear_table_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
         return
-    tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "training_data", "deleted_messages", "daily_stats", "reaction_log"]
+    tables = ["user_stats", "user_info", "violations", "reminders", "notes", "config"]
     keyboard = []
     for t in tables:
         keyboard.append([InlineKeyboardButton(f"🗑️ {t}", callback_data=f"clear_table_{t}")])
@@ -1927,15 +1757,10 @@ async def db_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         stats["user_stats"] = session.query(UserStats).count()
         stats["user_info"] = session.query(UserInfo).count()
-        stats["chat_memory"] = session.query(ChatMemory).count()
         stats["violations"] = session.query(Violation).count()
         stats["reminders"] = session.query(Reminder).count()
         stats["notes"] = session.query(Note).count()
         stats["config"] = session.query(Config).count()
-        stats["training_data"] = session.query(TrainingData).count()
-        stats["deleted_messages"] = session.query(DeletedMessage).count()
-        stats["daily_stats"] = session.query(DailyStats).count()
-        stats["reaction_log"] = session.query(ReactionLog).count()
     finally:
         session.close()
     lines = ["📊 **Статистика базы данных:**"]
@@ -1953,8 +1778,7 @@ async def search_code_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         "🔍 **Поиск в коде**\n\n"
         "Напишите текст для поиска в репозитории.\n"
-        "Используйте команду: `луна искать в коде <текст>`\n"
-        "Или просто отправьте текст, и я поищу.",
+        "Используйте команду: `луна искать в коде <текст>`",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1992,8 +1816,6 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 # ===== ОСНОВНАЯ ЛОГИКА =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message and update.message.text:
-        logger.info(f"🔍 [DEBUG] Получен текст: {update.message.text} от {update.effective_user.id}")
     try:
         message = update.effective_message
         user_id = update.effective_user.id
@@ -2010,8 +1832,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = message.text.strip()
         text_lower = text.lower()
-        logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
+        # Модерация
         if await apply_moderation(update, context):
             return
 
@@ -2022,14 +1844,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             last_name=user.last_name,
             language_code=user.language_code
         )
-
         update_user_stats(user_id, text, username=user.username, first_name=user.first_name)
-        add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (отключены) ===
-
-        # ===== 1. ЗАПОМНИ ИМЯ =====
+        # ===== ЗАПОМНИ ИМЯ =====
         is_name_command = False
         custom_name = None
 
@@ -2064,7 +1882,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
             return
 
-        # ===== 2. ЗАМЕТКИ =====
+        # ===== ЗАМЕТКИ =====
         if re.search(r'^луна\s+запомни\s+', text_lower) and not is_name_command:
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -2076,7 +1894,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # ===== 3. ВРЕМЯ =====
+        # ===== ВРЕМЯ =====
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
                 tz = get_user_timezone(user_info['timezone'])
@@ -2093,12 +1911,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
             return
 
-        # ===== 4. ОСТАЛЬНЫЕ КОМАНДЫ ВЛАДЕЛЬЦА =====
+        # ===== КОМАНДЫ ВЛАДЕЛЬЦА =====
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
                 table_name = match.group(1).lower()
-                valid_tables = ["user_stats", "user_info", "chat_memory", "violations", "reminders", "notes", "config", "training_data", "deleted_messages", "daily_stats", "reaction_log"]
+                valid_tables = ["user_stats", "user_info", "violations", "reminders", "notes", "config"]
                 if table_name in ["все", "all", "всех"]:
                     cleared = []
                     for t in valid_tables:
@@ -2151,7 +1969,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status_msg = await message.reply_text(f"📂 Загружаю файл: {file_path}...")
                 content = get_github_file_content(file_path)
                 if content is None:
-                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`. Проверьте путь.")
+                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`.")
                     return
                 if len(content) > 4000:
                     content = content[:4000] + "\n... (файл слишком большой, показана часть)"
@@ -2248,11 +2066,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # Определяем, нужно ли отвечать (AI)
+        # Определяем, нужно ли отвечать
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
-            add_to_user_memory(user_id, text)
         elif chat_type in [Chat.GROUP, Chat.SUPERGROUP]:
             if message.entities:
                 for entity in message.entities:
@@ -2275,15 +2092,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not should_reply and message.reply_to_message:
                 if message.reply_to_message.from_user.id == context.bot.id:
                     should_reply = True
-            if should_reply:
-                add_to_user_memory(user_id, text)
-            else:
-                return
+
+        if not should_reply:
+            return
 
         if not text:
             text = "Продолжай."
 
-        # Википедия для контекста
+        # Википедия для контекста (если есть ключевые слова)
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
@@ -2292,30 +2108,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Анти-спам
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
-            await message.reply_text("Пожалуйста, не спамь, дай подумать.")
+            await message.reply_text("Пожалуйста, не спамьте.")
             return
         last_request_time[user_id] = current_time
 
         await message.chat.send_action(action="typing")
 
-        # Подготовка к AI
+        # === ПОДГОТОВКА К AI ===
         global_mode = get_global_mode()
-        user_stats = get_user_stats(user_id)
-        if user_stats:
-            avg_len = user_stats["avg_len"]
-            if avg_len > 100:
-                style_note = "Пользователь предпочитает развёрнутые ответы. Отвечай подробно."
-            elif avg_len < 30:
-                style_note = "Пользователь предпочитает краткие ответы. Отвечай максимально сжато."
-            else:
-                style_note = "Отвечай сбалансированно."
-        else:
-            style_note = ""
+        custom_name = user_info.get('custom_name') if user_info else None
 
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
-        custom_name = user_info.get('custom_name') if user_info else None
-        context_text = build_context(chat_id, user_id, user_name, custom_name)
-
         user_time_str = ""
         if user_info and user_info.get('timezone'):
             tz = get_user_timezone(user_info['timezone'])
@@ -2326,60 +2129,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-        # === ПРОМПТЫ ===
+        # === ПРОМПТЫ (кратко, без смайликов, без лишних эмоций) ===
         mode_prompts = {
-            "fast": f"""Ты — Луна, быстрый AI-помощник. Отвечай кратко, только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
-Анализируй эмоциональное состояние пользователя и адаптируй ответ.
-{style_note}
-{user_time_str}""",
-            "smart": f"""Ты — Луна, умный AI-помощник. Отвечай развернуто, глубоко, используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
-Учитывай эмоции пользователя.
-{style_note}
-{user_time_str}""",
-            "sarcastic": f"""Ты — Луна, девушка с острым умом и живым характером. Ты отвечаешь с умной иронией, но только когда это уместно.
-Правила:
-- Если вопрос серьёзный (наука, работа, здоровье, важная информация) – отвечай серьёзно и полезно.
-- Если вопрос лёгкий, шутливый или пользователь сам иронизирует – можешь добавить сарказм, но он должен быть тонким, оригинальным, не шаблонным.
-- Не используй банальные шутки про программистов, баги, кофе и т.д.
-- Твой сарказм — это умная насмешка, а не грубость.
-- Ты не злая, а остроумная. Подкалывай, но не обижай.
-- Если пользователь в плохом настроении – будь мягче.
-- Если пользователь упомянул своё имя – используй его.
-Ты в {location}.
-{style_note}
-{user_time_str}""",
-            "flirt": f"""Ты — Луна, живая, дерзкая, остроумная. Твой стиль — лёгкий флирт с намёками и метафорами. Ты в {location}. Пользователь: {user_name}.
-Анализируй эмоции и адаптируй флирт.
-{style_note}
-{user_time_str}""",
-            "auto": f"""Ты — Луна, умный и адаптивный AI-ассистент. Твоя задача — анализировать каждый вопрос и выбирать подходящий тон ответа.
-
-Правила выбора тона:
-1. Если вопрос серьёзный, требует фактов, логики, касается науки, работы, здоровья, важных событий — отвечай **серьёзно, информативно и полезно**.
-2. Если вопрос лёгкий, шутливый, содержит иронию, сарказм, подвох или юмор — отвечай **с умной иронией, сарказмом или игриво** (но не грубо).
-3. Если вопрос нейтральный — выбери тон, который лучше всего подходит по контексту.
-4. Всегда учитывай настроение пользователя и его историю сообщений.
-5. Не используй банальные шутки, будь оригинальна.
-6. Если пользователь назвал своё имя — обращайся к нему по имени.
-
-Ты в {location}.
-{style_note}
-{user_time_str}
-Всегда отвечай на русском языке. Будь естественной и живой."""
+            "fast": f"""Ты — Luna AI, быстрый и деловой помощник. Отвечай кратко (2-3 предложения), только по существу. Без смайликов и лишних эмоций.
+Ты в {location}. {user_time_str}
+Имя пользователя: {user_name}{', обращайся по имени' if custom_name else ''}.
+Ответь на вопрос, используя факты.""",
+            "smart": f"""Ты — Luna AI, умный и эрудированный помощник. Отвечай развернуто, но не более 4-5 предложений. Используй логику и факты. Без смайликов.
+Ты в {location}. {user_time_str}
+Имя пользователя: {user_name}{', обращайся по имени' if custom_name else ''}.
+Ответь на вопрос.""",
+            "sarcastic": f"""Ты — Luna AI, остроумная и ироничная, но не грубая. Отвечай кратко (2-3 предложения), с лёгкой иронией, только если вопрос это позволяет. Без смайликов.
+Ты в {location}. {user_time_str}
+Имя пользователя: {user_name}{', обращайся по имени' if custom_name else ''}.
+Ответь на вопрос.""",
+            "flirt": f"""Ты — Luna AI, игривая и живая. Отвечай с лёгким флиртом, но в рамках приличия. Не более 3-4 предложений. Без смайликов.
+Ты в {location}. {user_time_str}
+Имя пользователя: {user_name}{', обращайся по имени' if custom_name else ''}.
+Ответь на вопрос.""",
+            "auto": f"""Ты — Luna AI, адаптивный помощник. Анализируй вопрос и выбери подходящий тон: если вопрос серьёзный – отвечай серьёзно и кратко, если шутливый – с иронией. В любом случае – без смайликов, не более 3-4 предложений.
+Ты в {location}. {user_time_str}
+Имя пользователя: {user_name}{', обращайся по имени' if custom_name else ''}.
+Ответь на вопрос."""
         }
 
         system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
-        system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
+        system_prompt += " Отвечай на русском языке. Без смайликов."
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{context_text}\n\nВопрос от {user_name}: {text}"}
+            {"role": "user", "content": f"Вопрос от {user_name}: {text}"}
         ]
 
-        thinking_msg = await message.reply_text("⚡ Думаю...")
+        thinking_msg = await message.reply_text("⏳ Думаю...")
         reply_text = None
         last_error = None
-        temperature = 1.0 if global_mode == "flirt" else 0.8
+        temperature = 0.7
 
         for model_name in MODELS:
             try:
@@ -2389,7 +2174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lambda: client.chat.completions.create(
                             model=model_name,
                             messages=messages,
-                            max_tokens=600,
+                            max_tokens=300,  # ограничиваем длину
                             temperature=temperature
                         )
                     ),
@@ -2409,28 +2194,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(1)
 
         if not reply_text or len(reply_text) < 3:
-            reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
-            logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
+            reply_text = "Не могу придумать ответ. Попробуйте переформулировать вопрос."
 
-        # === ОБУЧЕНИЕ: сохраняем пару (вопрос-ответ) для русских сообщений ===
-        if reply_text and re.search(r'[а-яА-Я]', text):
-            save_training_pair(text, reply_text, chat_id, user_id)
-
-        add_to_user_memory(user_id, reply_text, "assistant")
-        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
+        # Удаляем лишние смайлики из ответа (на всякий случай)
+        reply_text = re.sub(r'[😀-🙏🌀-🗿]', '', reply_text).strip()
 
         if len(reply_text) > 4000:
-            for i in range(0, len(reply_text), 4000):
-                await thinking_msg.edit_text(reply_text[i:i+4000])
-                if i + 4000 < len(reply_text):
-                    thinking_msg = await message.reply_text("📄 Продолжение...")
+            await thinking_msg.edit_text(reply_text[:4000] + "...")
         else:
             await thinking_msg.edit_text(reply_text)
 
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}")
         try:
-            await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз.")
+            await update.message.reply_text("⚠️ Ошибка. Попробуйте ещё раз.")
         except:
             pass
 
@@ -2440,7 +2217,6 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = join_request.from_user
     chat = join_request.chat
     if not OWNER_USER_ID:
-        logger.warning("Владелец не задан, автоматически одобряем")
         try:
             await join_request.approve()
         except Exception as e:
@@ -2566,7 +2342,7 @@ def main():
             BotCommand("imagine", "Генерация картинки (описание)"),
             BotCommand("yt", "Поиск на YouTube (запрос)"),
             BotCommand("remind", "Напоминание (время текст)"),
-            BotCommand("reset", "Сброс памяти и истории чата"),
+            BotCommand("reset", "Сброс памяти"),
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("stats_detail", "Подробная статистика (владелец)"),
@@ -2599,7 +2375,7 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)!")
+    logger.info("🚀 Luna AI запущен с трейлерами и музыкой (без истории чата)!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
