@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4), упрощённой музыкой (Spotify -> YouTube -> аудио)
-# Увеличенные таймауты, обработка больших файлов
+# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио, конвертация в MP3 если доступен ffmpeg)
+# Увеличенные таймауты, обход капчи YouTube
 
 import os
 import asyncio
@@ -12,6 +12,7 @@ import requests
 import base64
 import tempfile
 import yt_dlp
+import shutil
 from typing import Dict, List, Set, Tuple, Optional
 from datetime import datetime, timedelta
 import pytz
@@ -1071,7 +1072,6 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем файл по префиксу trailer.
                 video_file = None
                 for f in os.listdir(tmpdir):
                     if f.startswith('trailer.'):
@@ -1112,7 +1112,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио) ===
+# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио с конвертацией) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки через Spotify, берём первый трек, ищем на YouTube."""
     if not spotify:
@@ -1127,7 +1127,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Ищу на Spotify: {query}...")
 
     try:
-        results = spotify.search(q=query, type='track', limit=1)  # берём только первый трек
+        results = spotify.search(q=query, type='track', limit=1)
         tracks = results.get('tracks', {}).get('items', [])
 
         if not tracks:
@@ -1140,13 +1140,11 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = track['duration_ms'] // 1000
         spotify_url = track['external_urls']['spotify']
 
-        # Сохраняем данные трека
         context.user_data['music_track_name'] = track_name
         context.user_data['music_artists'] = artists
         context.user_data['music_duration'] = duration
         context.user_data['music_spotify_url'] = spotify_url
 
-        # Ищем видео на YouTube
         search_query = f"{track_name} {artists} official audio"
         await status_msg.edit_text(f"🔍 Ищу на YouTube: {search_query}...")
 
@@ -1191,9 +1189,9 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио с конвертацией в MP3) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио выбранного видео с YouTube и отправляет."""
+    """Скачивает аудио выбранного видео с YouTube и отправляет, конвертируя в MP3 если доступен ffmpeg."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1223,8 +1221,15 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
+    # Проверяем наличие ffmpeg
+    ffmpeg_available = shutil.which('ffmpeg') is not None
+    if ffmpeg_available:
+        logger.info("ffmpeg найден, будем конвертировать в MP3")
+    else:
+        logger.warning("ffmpeg не найден, отправляем как есть")
+
     ydl_opts = {
-        'format': 'bestaudio',
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
@@ -1235,7 +1240,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         'extractor_args': {
             'youtube': {
                 'skip': ['webpage', 'hls', 'dash'],
-                'player_client': ['android'],
+                'player_client': ['android', 'web'],
             }
         },
         'ignoreerrors': True,
@@ -1243,6 +1248,14 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         'timeout': 120,
         'socket_timeout': 120,
     }
+
+    # Добавляем постпроцессор для конвертации в MP3, если ffmpeg доступен
+    if ffmpeg_available:
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2019,19 +2032,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (отключены, т.к. вызывают ошибку) ===
-        # if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and user_id != context.bot.id:
-        #     if re.search(r'[а-яА-Я]', text):
-        #         reaction = get_reaction_for_text(text)
-        #         if reaction:
-        #             try:
-        #                 await context.bot.set_message_reaction(
-        #                     chat_id=chat_id,
-        #                     message_id=message.message_id,
-        #                     reaction=[ReactionTypeEmoji(emoji=reaction)]
-        #                 )
-        #             except Exception as e:
-        #                 logger.warning(f"Не удалось поставить реакцию: {e}")
+        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (отключены) ===
 
         # ===== 1. ЗАПОМНИ ИМЯ =====
         is_name_command = False
@@ -2531,12 +2532,11 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # ❗ Специфичные обработчики для трейлеров и музыки
+    # Специфичные обработчики
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
 
-    # Общий обработчик кнопок главного меню и админки
     application.add_handler(CallbackQueryHandler(button_callback))
 
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
