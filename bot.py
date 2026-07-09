@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Исправлена админ-панель: убраны ошибки парсинга Markdown (parse_mode=None для пользовательского текста)
+# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио)
+# Админ-панель полностью без Markdown (parse_mode=None) для всех сообщений.
 
 import os
 import asyncio
@@ -482,7 +482,7 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ===== АДМИН-ПАНЕЛЬ =====
+# ===== АДМИН-ПАНЕЛЬ (все сообщения без Markdown) =====
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
     keyboard = []
     row1 = []
@@ -522,7 +522,7 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_waiting'] = None
 
     text = (
-        "👑 *Админ-панель Luna AI*\n\n"
+        "👑 Админ-панель Luna AI\n\n"
         "Здесь вы можете подготовить рассылку для всех чатов.\n"
         "1️⃣ Напишите текст (нажмите кнопку)\n"
         "2️⃣ Прикрепите фото (опционально)\n"
@@ -533,7 +533,7 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text(
         text + "\n\n" + status,
         reply_markup=get_admin_keyboard(False, False),
-        parse_mode='Markdown'
+        parse_mode=None
     )
     context.user_data['admin_panel_message_id'] = msg.message_id
 
@@ -542,7 +542,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await query.edit_message_text("⛔ Доступ запрещён.")
+        await query.edit_message_text("⛔ Доступ запрещён.", parse_mode=None)
         return
 
     data = query.data
@@ -552,20 +552,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_write_text":
         user_data['admin_waiting'] = 'text'
         await query.edit_message_text(
-            "✏️ *Введите текст рассылки*\n\n"
+            "✏️ Введите текст рассылки\n\n"
             "Просто напишите сообщение в этот чат. Я сохраню его.\n"
             "Чтобы отменить, нажмите /cancel_admin",
-            parse_mode='Markdown'
+            parse_mode=None
         )
         await query.message.delete()
 
     elif data == "admin_add_photo":
         user_data['admin_waiting'] = 'photo'
         await query.edit_message_text(
-            "🖼️ *Прикрепите фото*\n\n"
+            "🖼️ Прикрепите фото\n\n"
             "Отправьте мне фото (одно). Я сохраню его.\n"
             "Чтобы пропустить, нажмите /skip_photo",
-            parse_mode='Markdown'
+            parse_mode=None
         )
         await query.message.delete()
 
@@ -2574,7 +2574,7 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # Админ-панель (без ConversationHandler)
+    # Админ-панель
     application.add_handler(CommandHandler("admin", admin_panel_start))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text_input))
@@ -2587,7 +2587,7 @@ def main():
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
 
-    # Общий обработчик кнопок (главное меню, админка старая, и т.д.)
+    # Общий обработчик кнопок
     application.add_handler(CallbackQueryHandler(button_callback))
 
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
