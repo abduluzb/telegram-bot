@@ -1264,7 +1264,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio',
+        'format': 'bestaudio',  # скачиваем лучший доступный аудиоформат
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
