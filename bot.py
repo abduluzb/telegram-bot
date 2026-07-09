@@ -1191,7 +1191,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио с конвертацией в MP3) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио выбранного видео с YouTube и отправляет, конвертируя в MP3 если доступен ffmpeg."""
+    """Скачивает аудио выбранного видео с YouTube и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1221,15 +1221,8 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
-    # Проверяем наличие ffmpeg
-    ffmpeg_available = shutil.which('ffmpeg') is not None
-    if ffmpeg_available:
-        logger.info("ffmpeg найден, будем конвертировать в MP3")
-    else:
-        logger.warning("ffmpeg не найден, отправляем как есть")
-
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+        'format': 'bestaudio',  # без фильтра, скачать лучший доступный аудио
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
@@ -1248,14 +1241,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         'timeout': 120,
         'socket_timeout': 120,
     }
-
-    # Добавляем постпроцессор для конвертации в MP3, если ffmpeg доступен
-    if ffmpeg_available:
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1281,7 +1266,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
                 if not audio_file:
                     logger.error(f"Файлы в tmpdir: {os.listdir(tmpdir)}")
-                    await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
+                    await status_msg.edit_text("❌ Не удалось найти скачанный файл. Попробуйте другой вариант.")
                     return
 
                 file_size = os.path.getsize(audio_file)
