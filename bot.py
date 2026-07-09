@@ -1115,7 +1115,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека) ===
+# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки через Spotify с выбором трека."""
     if not spotify:
@@ -1161,9 +1161,9 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка Spotify API: {e}")
         await status_msg.edit_text(f"❌ Ошибка при поиске: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ТРЕКА ===
+# === НОВЫЙ ОБРАБОТЧИК ВЫБОРА ТРЕКА (поиск видео на YouTube) ===
 async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает и отправляет аудио выбранного трека."""
+    """После выбора трека из Spotify – ищем видео на YouTube и предлагаем выбрать."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1185,43 +1185,121 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
     track = tracks[track_index]
     track_name = track['name']
     artists = ', '.join([a['name'] for a in track['artists']])
-    spotify_url = track['external_urls']['spotify']
-    duration_sec = track['duration_ms'] // 1000
 
-    status_msg = await query.edit_message_text(f"⬇️ Скачиваю: {track_name}...")
+    # Ищем видео на YouTube
+    search_query = f"{track_name} {artists} official audio"
+    status_msg = await query.edit_message_text(f"🔍 Ищу на YouTube: {search_query}...")
+
+    if not youtube:
+        await status_msg.edit_text("❌ YouTube API не настроен.")
+        return
 
     try:
-        yt_query = f"{track_name} {artists} official audio"
-        ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio',
-            'outtmpl': '%(title)s.%(ext)s',
-            'quiet': True,
-            'no_warnings': True,
-            'extractaudio': True,
-            'audioformat': 'm4a',
-            'noplaylist': True,
-            'default_search': 'ytsearch1',
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            },
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web'],
-                    'skip': ['hls', 'dash'],
-                }
-            },
-            'ignoreerrors': True,
-            'nooverwrites': True,
-            'timeout': 120,
-            'socket_timeout': 120,
-        }
+        request = youtube.search().list(
+            part="snippet",
+            q=search_query,
+            type="video",
+            maxResults=5,
+            order="relevance"
+        )
+        response = request.execute()
+        items = response.get("items", [])
 
+        if not items:
+            await status_msg.edit_text(f"❌ Не найдено видео на YouTube для '{track_name}'.")
+            return
+
+        # Сохраняем видео для последующего скачивания
+        context.user_data['music_youtube_videos'] = items
+        context.user_data['music_track_name'] = track_name
+        context.user_data['music_artists'] = artists
+        context.user_data['music_spotify_url'] = track['external_urls']['spotify']
+        context.user_data['music_duration'] = track['duration_ms'] // 1000
+
+        lines = [f"🎵 **{track_name}** — {artists}\nВыберите видео для скачивания:\n"]
+        keyboard = []
+        for i, item in enumerate(items, 1):
+            title = item["snippet"]["title"]
+            channel = item["snippet"]["channelTitle"]
+            lines.append(f"{i}. {title} (канал: {channel})")
+            keyboard.append([InlineKeyboardButton(f"▶️ {i}", callback_data=f"music_yt_select_{i-1}")])
+
+        # Кнопка отмены
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="music_cancel")])
+
+        text = "\n".join(lines)
+        await status_msg.edit_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка поиска YouTube для музыки: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
+
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
+async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивает аудио выбранного видео с YouTube и отправляет."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if not data.startswith("music_yt_select_"):
+        return
+
+    try:
+        video_index = int(data.split("_")[3])
+    except (IndexError, ValueError):
+        await query.edit_message_text("❌ Ошибка выбора.")
+        return
+
+    videos = context.user_data.get('music_youtube_videos')
+    if not videos or video_index >= len(videos):
+        await query.edit_message_text("❌ Список видео устарел. Попробуйте заново /music.")
+        return
+
+    video = videos[video_index]
+    video_id = video["id"]["videoId"]
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    title = video["snippet"]["title"]
+
+    track_name = context.user_data.get('music_track_name', 'Трек')
+    artists = context.user_data.get('music_artists', '')
+    duration = context.user_data.get('music_duration', 0)
+
+    status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
+
+    ydl_opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio',
+        'outtmpl': '%(title)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'extractaudio': True,
+        'audioformat': 'm4a',
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+                'skip': ['hls', 'dash'],
+            }
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 120,
+        'socket_timeout': 120,
+    }
+
+    try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: ydl.download([f"ytsearch1:{yt_query}"])
+                    lambda: ydl.download([video_url])
                 )
                 try:
                     await asyncio.wait_for(download_task, timeout=120)
@@ -1238,9 +1316,9 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
                     await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
                     return
 
-                # Проверяем размер (для аудио обычно меньше 50 МБ, но на всякий случай)
                 file_size = os.path.getsize(audio_file)
                 if file_size > 49 * 1024 * 1024:
+                    spotify_url = context.user_data.get('music_spotify_url', '')
                     await status_msg.edit_text(
                         f"🎵 **{track_name}** — {artists}\n\n"
                         f"⚠️ Файл слишком большой ({file_size // (1024*1024)} МБ). Telegram принимает до 50 МБ.\n"
@@ -1256,16 +1334,22 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
                         audio=f,
                         title=track_name,
                         performer=artists,
-                        duration=duration_sec,
+                        duration=duration,
                     )
                 await status_msg.delete()
 
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"Ошибка yt-dlp: {e}")
-        await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}\n\nПопробуйте другой трек.")
+        await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}\n\nПопробуйте другой вариант.")
     except Exception as e:
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
+
+# === ОБРАБОТЧИК ОТМЕНЫ ДЛЯ МУЗЫКИ ===
+async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Поиск музыки отменён.")
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2463,6 +2547,7 @@ def main():
             MessageHandler(filters.ALL, cancel_admin),
         ],
         per_user=True,
+        per_message=True,   # исправлено предупреждение
     )
     application.add_handler(admin_conv_handler)
 
@@ -2493,7 +2578,11 @@ def main():
 
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
+    # новые обработчики для музыки
     application.add_handler(CallbackQueryHandler(music_select_callback, pattern="^music_select_"))
+    application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
+    application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
+
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
