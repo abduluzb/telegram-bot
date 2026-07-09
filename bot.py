@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Исправлена админ-панель: без ConversationHandler, работает стабильно.
+# Исправлена админ-панель: убраны ошибки парсинга Markdown.
 
 import os
 import asyncio
@@ -517,11 +517,10 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⛔ Доступ запрещён.")
         return
 
-    # Инициализируем данные
     context.user_data['admin_text'] = None
     context.user_data['admin_photo'] = None
     context.user_data['admin_photo_file_id'] = None
-    context.user_data['admin_waiting'] = None  # 'text' или 'photo'
+    context.user_data['admin_waiting'] = None
 
     text = (
         "👑 *Админ-панель Luna AI*\n\n"
@@ -560,7 +559,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Чтобы отменить, нажмите /cancel_admin",
             parse_mode='Markdown'
         )
-        # Удаляем сообщение с кнопками, чтобы не мешало
         await query.message.delete()
 
     elif data == "admin_add_photo":
@@ -618,7 +616,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=None
             )
         else:
-            await query.message.reply_text(preview_text, parse_mode='Markdown')
+            await query.message.reply_text(preview_text, parse_mode=None)
         await query.answer()
 
     elif data == "admin_send":
@@ -644,7 +642,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=cid,
                         photo=photo,
                         caption=text if text else None,
-                        parse_mode=None
+                        parse_mode='Markdown'
                     )
                 else:
                     await context.bot.send_message(
@@ -665,7 +663,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=OWNER_USER_ID,
                         photo=photo,
                         caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                        parse_mode=None
+                        parse_mode='Markdown'
                     )
                 else:
                     await context.bot.send_message(
@@ -683,7 +681,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Ошибок: {errors}",
             reply_markup=get_admin_keyboard(False, False)
         )
-        # Очищаем данные после отправки
         user_data['admin_text'] = None
         user_data['admin_photo'] = None
         user_data['admin_photo_file_id'] = None
@@ -706,7 +703,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ("admin_text_set", "admin_photo_set"):
         await query.answer("Уже задано")
 
-# Обработчики для ввода текста и фото из админ-панели
 async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принимает текст для рассылки."""
     user_id = update.effective_user.id
@@ -715,7 +711,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if context.user_data.get('admin_waiting') != 'text':
-        return  # не ждём текст
+        return
 
     text = update.message.text
     if text.startswith('/'):
@@ -734,7 +730,8 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
                 message_id=panel_id,
                 text=f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
                      "Возвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
+                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
+                parse_mode=None
             )
             await update.message.delete()
             return
@@ -778,7 +775,8 @@ async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT
                 chat_id=update.effective_chat.id,
                 message_id=panel_id,
                 text="✅ Фото сохранено.\n\nВозвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True),
+                parse_mode=None
             )
             await update.message.delete()
             return
@@ -1002,7 +1000,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=cid,
                     photo=photo.file_id,
                     caption=text if text else None,
-                    parse_mode=None
+                    parse_mode='Markdown'
                 )
             else:
                 await context.bot.send_message(
@@ -1023,7 +1021,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=OWNER_USER_ID,
                     photo=photo.file_id,
                     caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                    parse_mode=None
+                    parse_mode='Markdown'
                 )
             else:
                 await context.bot.send_message(
