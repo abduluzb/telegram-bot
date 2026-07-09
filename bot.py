@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Увеличенные таймауты, обход капчи YouTube
+# Исправлена админ-панель: текст сохраняется и панель обновляется.
 
 import os
 import asyncio
@@ -532,12 +532,14 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Текущий статус:"
     )
     status = "📝 Текст: не задан\n🖼️ Фото: нет"
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text + "\n\n" + status,
         reply_markup=get_admin_keyboard(False, False),
         parse_mode='Markdown'
     )
+    # Сохраняем ID сообщения панели, чтобы потом редактировать
+    context.user_data['admin_panel_message_id'] = msg.message_id
     return ConversationHandler.END
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -552,6 +554,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
 
     if data == "admin_write_text":
+        # Сохраняем ID сообщения панели, чтобы потом отредактировать его
+        user_data['admin_edit_message_id'] = query.message.message_id
         await query.edit_message_text(
             "✏️ *Введите текст рассылки*\n\n"
             "Просто напишите сообщение в этот чат. Я сохраню его.\n"
@@ -561,6 +565,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_TEXT
 
     elif data == "admin_add_photo":
+        # Сохраняем ID сообщения панели
+        user_data['admin_edit_message_id'] = query.message.message_id
         await query.edit_message_text(
             "🖼️ *Прикрепите фото*\n\n"
             "Отправьте мне фото (одно). Я сохраню его.\n"
@@ -573,6 +579,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data['admin_text'] = None
         user_data['admin_photo'] = None
         user_data['admin_photo_file_id'] = None
+        # Если есть ID панели, редактируем
+        panel_id = user_data.get('admin_panel_message_id')
+        if panel_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=panel_id,
+                    text="🗑️ *Все данные очищены.*\n\nВозвращаюсь в панель.",
+                    reply_markup=get_admin_keyboard(False, False),
+                    parse_mode='Markdown'
+                )
+                await query.delete_message()
+                return ConversationHandler.END
+            except:
+                pass
         await query.edit_message_text(
             "🗑️ *Все данные очищены.*\n\nВозвращаюсь в панель.",
             reply_markup=get_admin_keyboard(False, False),
@@ -691,13 +712,41 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Команды не принимаются. Напишите текст.")
         return WAITING_TEXT
 
-    context.user_data['admin_text'] = text
-    await update.message.reply_text(
-        f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
-        "Возвращаюсь в панель.",
-        reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
-    )
-    return ConversationHandler.END
+    user_data = context.user_data
+    user_data['admin_text'] = text
+    logger.info(f"✅ Текст сохранён: {text[:100]}...")
+
+    # Редактируем исходное сообщение панели
+    panel_id = user_data.get('admin_edit_message_id')
+    if panel_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=panel_id,
+                text=f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
+                     "Возвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+            )
+            # Удаляем сообщение пользователя с текстом
+            await update.message.delete()
+            return ConversationHandler.END
+        except Exception as e:
+            logger.error(f"Ошибка редактирования панели: {e}")
+            # Если не удалось, отправляем новое сообщение
+            await update.message.reply_text(
+                f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
+                "Возвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+            )
+            return ConversationHandler.END
+    else:
+        # Если ID нет, просто отвечаем
+        await update.message.reply_text(
+            f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
+            "Возвращаюсь в панель.",
+            reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+        )
+        return ConversationHandler.END
 
 async def handle_admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -711,14 +760,35 @@ async def handle_admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return WAITING_PHOTO
 
     photo_file = photo[-1]
-    context.user_data['admin_photo_file_id'] = photo_file.file_id
-    context.user_data['admin_photo'] = photo_file
+    user_data = context.user_data
+    user_data['admin_photo_file_id'] = photo_file.file_id
+    user_data['admin_photo'] = photo_file
+    logger.info("✅ Фото сохранено")
 
-    await update.message.reply_text(
-        "✅ Фото сохранено.\n\nВозвращаюсь в панель.",
-        reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
-    )
-    return ConversationHandler.END
+    panel_id = user_data.get('admin_edit_message_id')
+    if panel_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=panel_id,
+                text="✅ Фото сохранено.\n\nВозвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+            )
+            await update.message.delete()
+            return ConversationHandler.END
+        except Exception as e:
+            logger.error(f"Ошибка редактирования панели: {e}")
+            await update.message.reply_text(
+                "✅ Фото сохранено.\n\nВозвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+            )
+            return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "✅ Фото сохранено.\n\nВозвращаюсь в панель.",
+            reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+        )
+        return ConversationHandler.END
 
 async def skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -726,9 +796,24 @@ async def skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return ConversationHandler.END
 
+    user_data = context.user_data
+    panel_id = user_data.get('admin_edit_message_id')
+    if panel_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=panel_id,
+                text="⏭️ Фото пропущено. Возвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), False)
+            )
+            await update.message.delete()
+            return ConversationHandler.END
+        except:
+            pass
+
     await update.message.reply_text(
         "⏭️ Фото пропущено. Возвращаюсь в панель.",
-        reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False)
+        reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), False)
     )
     return ConversationHandler.END
 
@@ -738,11 +823,29 @@ async def cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return ConversationHandler.END
 
+    user_data = context.user_data
+    panel_id = user_data.get('admin_edit_message_id')
+    if panel_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=panel_id,
+                text="❌ Отменено. Возвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(
+                    bool(user_data.get('admin_text')),
+                    bool(user_data.get('admin_photo_file_id'))
+                )
+            )
+            await update.message.delete()
+            return ConversationHandler.END
+        except:
+            pass
+
     await update.message.reply_text(
         "❌ Отменено. Возвращаюсь в панель.",
         reply_markup=get_admin_keyboard(
-            bool(context.user_data.get('admin_text')),
-            bool(context.user_data.get('admin_photo_file_id'))
+            bool(user_data.get('admin_text')),
+            bool(user_data.get('admin_photo_file_id'))
         )
     )
     return ConversationHandler.END
