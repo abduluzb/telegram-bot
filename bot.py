@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио)
-# Админ-панель без удаления сообщения, исправлена обработка ответов.
+# bot.py - Luna AI с трейлерами и музыкой
+# Добавлено логирование всех входящих сообщений для отладки
 
 import os
 import asyncio
@@ -551,13 +551,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admin_write_text":
         user_data['admin_waiting'] = 'text'
-        # Не удаляем сообщение, а просто редактируем
         await query.edit_message_text(
             "✏️ Введите текст рассылки\n\n"
             "Просто напишите сообщение в этот чат. Я сохраню его.\n"
             "Чтобы отменить, нажмите /cancel_admin",
             parse_mode=None
         )
+        await query.message.delete()
 
     elif data == "admin_add_photo":
         user_data['admin_waiting'] = 'photo'
@@ -567,6 +567,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Чтобы пропустить, нажмите /skip_photo",
             parse_mode=None
         )
+        await query.message.delete()
 
     elif data == "admin_clear":
         user_data['admin_text'] = None
@@ -731,7 +732,6 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     context.user_data['admin_waiting'] = None
     logger.info(f"✅ Текст сохранён: {text[:100]}...")
 
-    # Возвращаем панель
     panel_id = context.user_data.get('admin_panel_message_id')
     if panel_id:
         try:
@@ -746,7 +746,6 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             return
         except Exception as e:
             logger.error(f"Ошибка редактирования панели: {e}")
-            # Если не удалось, отправляем новое сообщение
             await update.message.reply_text(
                 f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
                 reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
@@ -870,6 +869,7 @@ async def skip_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== КОМАНДЫ =====
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("🔥 start_command вызвана")
     user = update.effective_user
     user_id = user.id
     user_info = get_or_create_user_info(
@@ -2066,10 +2066,15 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 # ===== ОСНОВНАЯ ЛОГИКА =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Добавьте эти строки в самое начало
-    logger.info("🔥 handle_message вызвана!")
+    # Логируем вызов функции
+    logger.info("🔥 handle_message вызвана")
     if update.message:
         logger.info(f"🔥 Сообщение: {update.message.text} от {update.effective_user.id}")
+    else:
+        logger.info("🔥 Обновление без сообщения")
+
+    if update.message and update.message.text:
+        logger.info(f"🔍 [DEBUG] Получен текст: {update.message.text} от {update.effective_user.id}")
     try:
         message = update.effective_message
         user_id = update.effective_user.id
@@ -2550,6 +2555,13 @@ def main():
     logger.info("▶️ Инициализация приложения Luna AI...")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # === ВРЕМЕННЫЙ ОБРАБОТЧИК ДЛЯ ЛОГИРОВАНИЯ ВСЕХ СООБЩЕНИЙ ===
+    async def log_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        logger.info(f"🔥 LOG_ALL: получил обновление типа {update}")
+        if update.message:
+            logger.info(f"🔥 LOG_ALL: сообщение: {update.message.text}")
+    application.add_handler(MessageHandler(filters.ALL, log_all), group=0)
 
     # Команды
     application.add_handler(CommandHandler("start", start_command))
