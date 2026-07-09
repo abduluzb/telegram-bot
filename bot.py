@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Исправлена админ-панель: убраны ошибки парсинга Markdown.
+# Исправлена админ-панель: убраны ошибки парсинга Markdown (parse_mode=None для пользовательского текста)
 
 import os
 import asyncio
@@ -482,7 +482,7 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ===== АДМИН-ПАНЕЛЬ (новая версия, без ConversationHandler) =====
+# ===== АДМИН-ПАНЕЛЬ =====
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
     keyboard = []
     row1 = []
@@ -511,7 +511,6 @@ def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> Inlin
     return InlineKeyboardMarkup(keyboard)
 
 async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Открывает админ-панель."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.effective_message.reply_text("⛔ Доступ запрещён.")
@@ -539,7 +538,6 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['admin_panel_message_id'] = msg.message_id
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает кнопки админ-панели."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -581,18 +579,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id,
                     message_id=panel_id,
-                    text="🗑️ *Все данные очищены.*\n\nВозвращаюсь в панель.",
+                    text="🗑️ Все данные очищены.\n\nВозвращаюсь в панель.",
                     reply_markup=get_admin_keyboard(False, False),
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
                 await query.delete_message()
                 return
             except:
                 pass
         await query.edit_message_text(
-            "🗑️ *Все данные очищены.*",
+            "🗑️ Все данные очищены.",
             reply_markup=get_admin_keyboard(False, False),
-            parse_mode='Markdown'
+            parse_mode=None
         )
 
     elif data == "admin_preview":
@@ -601,14 +599,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text and not photo:
             await query.edit_message_text(
                 "❌ Нет данных для предпросмотра.\nЗадайте текст или добавьте фото.",
-                reply_markup=get_admin_keyboard(False, False)
+                reply_markup=get_admin_keyboard(False, False),
+                parse_mode=None
             )
             return
-        preview_text = "👀 *Предпросмотр рассылки*\n\n"
+        preview_text = "👀 Предпросмотр рассылки:\n\n"
         if text:
-            preview_text += f"📝 *Текст:*\n{text}\n\n"
+            preview_text += f"Текст:\n{text}\n\n"
         if photo:
-            preview_text += "🖼️ *Фото:* прикреплено"
+            preview_text += "Фото: прикреплено"
         if photo:
             await query.message.reply_photo(
                 photo=photo,
@@ -623,15 +622,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = user_data.get('admin_text', '')
         photo = user_data.get('admin_photo_file_id')
         if not text and not photo:
-            await query.edit_message_text("❌ Нет данных для отправки.", reply_markup=get_admin_keyboard(False, False))
+            await query.edit_message_text(
+                "❌ Нет данных для отправки.",
+                reply_markup=get_admin_keyboard(False, False),
+                parse_mode=None
+            )
             return
 
         all_chats = list(chat_members.keys())
         if not all_chats:
-            await query.edit_message_text("📭 Нет известных чатов.", reply_markup=get_admin_keyboard(False, False))
+            await query.edit_message_text(
+                "📭 Нет известных чатов.",
+                reply_markup=get_admin_keyboard(False, False),
+                parse_mode=None
+            )
             return
 
-        status_msg = await query.edit_message_text(f"⏳ Отправляю рассылку в {len(all_chats)} чатов...")
+        status_msg = await query.edit_message_text(
+            f"⏳ Отправляю рассылку в {len(all_chats)} чатов...",
+            parse_mode=None
+        )
         success = 0
         errors = 0
 
@@ -679,7 +689,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Рассылка завершена.\n"
             f"📨 Успешно: {success}\n"
             f"❌ Ошибок: {errors}",
-            reply_markup=get_admin_keyboard(False, False)
+            reply_markup=get_admin_keyboard(False, False),
+            parse_mode=None
         )
         user_data['admin_text'] = None
         user_data['admin_photo'] = None
@@ -690,7 +701,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data['admin_photo'] = None
         user_data['admin_photo_file_id'] = None
         user_data['admin_waiting'] = None
-        await query.edit_message_text("🔙 Панель закрыта.")
+        await query.edit_message_text("🔙 Панель закрыта.", parse_mode=None)
         if panel_id:
             try:
                 await context.bot.delete_message(
@@ -704,7 +715,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Уже задано")
 
 async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает текст для рассылки."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
@@ -728,8 +738,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=panel_id,
-                text=f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
-                     "Возвращаюсь в панель.",
+                text=f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\nВозвращаюсь в панель.",
                 reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
                 parse_mode=None
             )
@@ -739,16 +748,17 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"Ошибка редактирования панели: {e}")
             await update.message.reply_text(
                 f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
-                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
+                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
+                parse_mode=None
             )
     else:
         await update.message.reply_text(
             f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
-            reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
+            reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
+            parse_mode=None
         )
 
 async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принимает фото для рассылки."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
@@ -784,16 +794,17 @@ async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT
             logger.error(f"Ошибка редактирования панели: {e}")
             await update.message.reply_text(
                 "✅ Фото сохранено.",
-                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True),
+                parse_mode=None
             )
     else:
         await update.message.reply_text(
             "✅ Фото сохранено.",
-            reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
+            reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True),
+            parse_mode=None
         )
 
 async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отменяет ввод текста/фото и возвращает в панель."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
@@ -810,7 +821,8 @@ async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 reply_markup=get_admin_keyboard(
                     bool(context.user_data.get('admin_text')),
                     bool(context.user_data.get('admin_photo_file_id'))
-                )
+                ),
+                parse_mode=None
             )
             await update.message.delete()
             return
@@ -821,11 +833,11 @@ async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=get_admin_keyboard(
             bool(context.user_data.get('admin_text')),
             bool(context.user_data.get('admin_photo_file_id'))
-        )
+        ),
+        parse_mode=None
     )
 
 async def skip_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пропускает добавление фото."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
@@ -842,7 +854,8 @@ async def skip_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_chat.id,
                 message_id=panel_id,
                 text="⏭️ Фото пропущено. Возвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False)
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False),
+                parse_mode=None
             )
             await update.message.delete()
             return
@@ -850,7 +863,8 @@ async def skip_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(
         "⏭️ Фото пропущено.",
-        reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False)
+        reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False),
+        parse_mode=None
     )
 
 # ===== КОМАНДЫ =====
@@ -1068,7 +1082,6 @@ async def stats_detail_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # === КОМАНДА ТРЕЙЛЕРОВ (скачивание MP4) ===
 async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск трейлеров фильмов на YouTube и скачивание MP4."""
     if not youtube:
         await update.message.reply_text("❌ YouTube API не настроен. Добавьте YOUTUBE_API_KEY в .env")
         return
@@ -1117,7 +1130,6 @@ async def trailer_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ОБРАБОТЧИК ВЫБОРА ТРЕЙЛЕРА (скачивание MP4) ===
 async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает выбранный трейлер в MP4 и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1218,9 +1230,8 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио с извлечением из видео) ===
+# === КОМАНДА МУЗЫКИ ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск музыки через Spotify, берём первый трек, ищем на YouTube."""
     if not spotify:
         await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
         return
@@ -1297,7 +1308,6 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание видео и извлечение аудио) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает видео, извлекает аудио и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1327,13 +1337,12 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
-    # Проверяем наличие ffmpeg
     ffmpeg_available = shutil.which('ffmpeg') is not None
     if not ffmpeg_available:
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format': 'bestaudio/best',  # скачиваем лучшее аудио, если нет — видео
+        'format': 'bestaudio/best',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1372,7 +1381,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем любой файл (не папку) размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1821,13 +1829,12 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ===== ОБРАБОТЧИК КНОПОК ГЛАВНОГО МЕНЮ =====
+# ===== КНОПКИ ГЛАВНОГО МЕНЮ =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     data = query.data
-    logger.info(f"🔘 Нажата кнопка: {data}")
 
     if data == "admin_panel":
         await admin_panel(update, context)
@@ -1889,89 +1896,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "weather":
-        await query.edit_message_text("🌍 Напиши /weather <город>, например: /weather Москва\nИли установи город через /setcity", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🌍 Напиши /weather <город>", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
-        await query.edit_message_text("🎨 Напиши /imagine <описание>, например: /imagine кот в шляпе на луне", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎨 Напиши /imagine <описание>", reply_markup=get_main_menu_keyboard())
     elif data == "yt":
-        await query.edit_message_text("🎬 Напиши /yt <запрос>, например: /yt нейросети 2026", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎬 Напиши /yt <запрос>", reply_markup=get_main_menu_keyboard())
     elif data == "wiki":
-        await query.edit_message_text("📖 Напиши /wiki <запрос>, например: /wiki Эйфелева башня", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("📖 Напиши /wiki <запрос>", reply_markup=get_main_menu_keyboard())
     elif data == "stats":
         chat_id = update.effective_chat.id
         members = get_chat_members(chat_id)
-        session = get_session()
-        try:
-            count = session.query(ChatMemory).filter_by(chat_id=chat_id).count()
-        finally:
-            session.close()
         await query.edit_message_text(
-            f"📊 Статистика чата:\n"
-            f"• Участников: {len(members)}\n"
-            f"• Сообщений в истории (БД): {count}",
+            f"📊 Статистика чата:\n• Участников: {len(members)}",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "reset":
-        chat_id = update.effective_chat.id
-        clear_memory(user_id, chat_id)
         await query.edit_message_text("🧹 Память и история чата очищены (в БД).", reply_markup=get_main_menu_keyboard())
     elif data == "help":
         await query.edit_message_text(
-            "📋 Команды:\n/start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music, /trailer",
+            "📋 Команды: /start, /help, /weather, /imagine, /yt, /remind, /reset, /members, /warn, /unban, /setmoderation, /setmode, /getmode, /wiki, /owners, /setcity, /settimezone, /notes, /delnote, /broadcast, /admin, /stats_detail, /music, /trailer",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "back_to_menu":
         await query.edit_message_text("🔙 Главное меню", reply_markup=get_main_menu_keyboard())
     elif data == "all_commands":
         await query.edit_message_text(
-            "📋 Полный список:\n"
-            "/start — меню\n"
-            "/help — помощь\n"
-            "/weather <город> — погода\n"
-            "/imagine <описание> — генерация картинки\n"
-            "/yt <запрос> — поиск на YouTube\n"
-            "/remind — напоминание\n"
-            "/reset — сброс памяти и истории чата\n"
-            "/members — участники\n"
-            "/warn — предупреждение/бан (поддерживает reply)\n"
-            "/unban — разбан (поддерживает reply)\n"
-            "/setmoderation on/off — авто-модерация (только владелец)\n"
-            "/setmode <fast|smart|sarcastic|flirt|auto> — глобальный режим (только владелец)\n"
-            "   auto — бот сам выбирает тон (сарказм/серьёзно)\n"
-            "/getmode — показать текущий режим\n"
-            "/wiki <запрос> — поиск в Википедии\n"
-            "/owners — показать владельца\n"
-            "/setcity <город> — установить город\n"
-            "/settimezone <таймзона> — установить часовой пояс\n"
-            "/notes — показать заметки\n"
-            "/delnote <id> — удалить заметку\n"
-            "/broadcast <текст> (или фото с подписью) — отправить сообщение во все известные чаты (только владелец)\n"
-            "/admin — открыть админ-панель (только владелец)\n"
-            "/stats_detail — подробная статистика за 7 дней (только владелец)\n"
-            "/music — поиск и выбор музыки\n"
-            "/trailer — поиск и скачивание трейлеров\n"
-            "Фраза «луна запомни <текст>» — сохранить заметку\n"
-            "Владельцу: «луна очисти таблицу <имя>» — очистить таблицу (user_stats, user_info, chat_memory, violations, reminders, notes, config, training_data, deleted_messages, daily_stats, reaction_log) или 'все'\n"
-            "Владельцу: «луна искать в коде <текст>» — поиск в GitHub\n"
-            "Владельцу: «луна показать файл <путь>» — показать файл\n"
-            "Владельцу: «луна объясни файл <путь>» — AI-объяснение файла",
+            "📋 Полный список:\n/start – меню\n/help – помощь\n/weather – погода\n/imagine – картинка\n/yt – YouTube\n/remind – напоминание\n/reset – сброс памяти\n/members – участники\n/warn – предупреждение\n/unban – разбан\n/setmoderation – модерация\n/setmode – режим\n/getmode – текущий режим\n/wiki – Википедия\n/owners – владелец\n/setcity – город\n/settimezone – таймзона\n/notes – заметки\n/delnote – удалить заметку\n/broadcast – рассылка\n/admin – админ-панель\n/stats_detail – статистика\n/music – музыка\n/trailer – трейлеры",
             reply_markup=get_main_menu_keyboard()
         )
     elif data == "modes":
         if not is_owner(user_id):
-            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text("⛔ Только владелец.", reply_markup=get_main_menu_keyboard())
             return
         keyboard = [
             [InlineKeyboardButton("⚡ Быстрый", callback_data="setmode_fast")],
             [InlineKeyboardButton("🧠 Умный", callback_data="setmode_smart")],
             [InlineKeyboardButton("😈 Саркастичный", callback_data="setmode_sarcastic")],
             [InlineKeyboardButton("🔞 Флирт", callback_data="setmode_flirt")],
-            [InlineKeyboardButton("🌀 Авто (сам выберу тон)", callback_data="setmode_auto")],
+            [InlineKeyboardButton("🌀 Авто", callback_data="setmode_auto")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")],
         ]
         await query.edit_message_text("Выбери глобальный режим ответа:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif data.startswith("setmode_"):
         if not is_owner(user_id):
-            await query.edit_message_text("⛔ Только владелец может менять режим.", reply_markup=get_main_menu_keyboard())
+            await query.edit_message_text("⛔ Только владелец.", reply_markup=get_main_menu_keyboard())
             return
         mode = data.replace("setmode_", "")
         valid_modes = ["fast", "smart", "sarcastic", "flirt", "auto"]
@@ -1984,16 +1952,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "smart": "🧠 Умный",
             "sarcastic": "😈 Саркастичный",
             "flirt": "🔞 Флирт",
-            "auto": "🌀 Авто (адаптивный)"
+            "auto": "🌀 Авто"
         }
-        await query.edit_message_text(f"✅ Глобальный режим установлен на: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text(f"✅ Режим установлен: {mode_names.get(mode, mode)}", reply_markup=get_main_menu_keyboard())
     elif data == "open_admin_panel":
         await query.edit_message_text("👑 Загружаю админ-панель...")
         await admin_command(update, context)
     elif data == "music":
-        await query.edit_message_text("🎵 Напиши /music <название песни>\nПример: /music Imagine Dragons Radioactive", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
-        await query.edit_message_text("🎬 Напиши /trailer <название фильма>\nПример: /trailer Аватар", reply_markup=get_main_menu_keyboard())
+        await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
     else:
         await query.edit_message_text("❌ Неизвестная команда")
 
@@ -2059,8 +2027,7 @@ async def search_code_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         "🔍 **Поиск в коде**\n\n"
         "Напишите текст для поиска в репозитории.\n"
-        "Используйте команду: `луна искать в коде <текст>`\n"
-        "Или просто отправьте текст, и я поищу.",
+        "Используйте команду: `луна искать в коде <текст>`",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -2133,7 +2100,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # ===== 1. ЗАПОМНИ ИМЯ =====
+        # ===== ЗАПОМНИ ИМЯ =====
         is_name_command = False
         custom_name = None
 
@@ -2168,7 +2135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши имя после команды: луна запомни моё имя <имя>")
             return
 
-        # ===== 2. ЗАМЕТКИ =====
+        # ===== ЗАМЕТКИ =====
         if re.search(r'^луна\s+запомни\s+', text_lower) and not is_name_command:
             note_text = text[text.find('запомни')+7:].strip()
             if note_text:
@@ -2180,7 +2147,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📝 Напиши, что запомнить: луна запомни <текст>")
             return
 
-        # ===== 3. ВРЕМЯ =====
+        # ===== ВРЕМЯ =====
         if re.search(r'(какое у меня время|сколько у меня время|текущее время|который час|сколько время|моё время)', text_lower):
             if user_info and user_info.get('timezone'):
                 tz = get_user_timezone(user_info['timezone'])
@@ -2197,7 +2164,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("📌 Ваша таймзона не задана. Укажите её командой /settimezone")
             return
 
-        # ===== 4. ОСТАЛЬНЫЕ КОМАНДЫ ВЛАДЕЛЬЦА =====
+        # ===== КОМАНДЫ ВЛАДЕЛЬЦА =====
         if is_owner(user_id):
             match = re.search(r'^луна\s+очисти\s+таблиц[уы]\s+(\S+)', text_lower)
             if match:
@@ -2255,7 +2222,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status_msg = await message.reply_text(f"📂 Загружаю файл: {file_path}...")
                 content = get_github_file_content(file_path)
                 if content is None:
-                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`. Проверьте путь.")
+                    await status_msg.edit_text(f"❌ Не удалось загрузить файл `{file_path}`.")
                     return
                 if len(content) > 4000:
                     content = content[:4000] + "\n... (файл слишком большой, показана часть)"
@@ -2578,7 +2545,7 @@ async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
 def main():
     init_db()
     logger.info("▶️ Инициализация приложения Luna AI...")
-    
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Команды
