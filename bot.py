@@ -1,4 +1,4 @@
-# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио, конвертация в MP3 если доступен ffmpeg)
+# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
 # Увеличенные таймауты, обход капчи YouTube
 
 import os
@@ -1112,7 +1112,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио с конвертацией) ===
+# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио с извлечением из видео) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки через Spotify, берём первый трек, ищем на YouTube."""
     if not spotify:
@@ -1189,9 +1189,9 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио с конвертацией в MP3) ===
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание видео и извлечение аудио) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио выбранного видео с YouTube и отправляет."""
+    """Скачивает видео, извлекает аудио и отправляет."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1221,8 +1221,18 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
+    # Проверяем наличие ffmpeg
+    ffmpeg_available = shutil.which('ffmpeg') is not None
+    if not ffmpeg_available:
+        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
+
     ydl_opts = {
-        'format': 'bestaudio',  # без фильтра, скачать лучший доступный аудио
+        'format': 'bestaudio/best',  # скачиваем лучшее аудио, если нет — видео
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }] if ffmpeg_available else [],
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
