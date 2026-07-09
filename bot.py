@@ -1161,7 +1161,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка Spotify API: {e}")
         await status_msg.edit_text(f"❌ Ошибка при поиске: {e}")
 
-# === НОВЫЙ ОБРАБОТЧИК ВЫБОРА ТРЕКА (поиск видео на YouTube) ===
+# === ОБРАБОТЧИК ВЫБОРА ТРЕКА (поиск видео на YouTube) ===
 async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """После выбора трека из Spotify – ищем видео на YouTube и предлагаем выбрать."""
     query = update.callback_query
@@ -2547,7 +2547,7 @@ def main():
             MessageHandler(filters.ALL, cancel_admin),
         ],
         per_user=True,
-        per_message=True,   # исправлено предупреждение
+        per_message=True,
     )
     application.add_handler(admin_conv_handler)
 
@@ -2576,12 +2576,14 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    application.add_handler(CallbackQueryHandler(button_callback))
+    # ❗ ВАЖНО: специфичные обработчики для трейлеров и музыки ДО общего button_callback
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
-    # новые обработчики для музыки
     application.add_handler(CallbackQueryHandler(music_select_callback, pattern="^music_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
+
+    # Общий обработчик кнопок главного меню и админки – после специфичных
+    application.add_handler(CallbackQueryHandler(button_callback))
 
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
