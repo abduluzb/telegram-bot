@@ -1,4 +1,4 @@
-# bot.py - Luna AI с трейлерами (MP4), выбором музыки, админ-панелью и всеми функциями
+# bot.py - Luna AI с трейлерами (MP4), упрощённой музыкой (Spotify -> YouTube -> аудио)
 # Увеличенные таймауты, обработка больших файлов
 
 import os
@@ -22,7 +22,7 @@ except ImportError:
     ZoneInfo = None
 
 from dotenv import load_dotenv
-from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, ReactionTypeEmoji
+from telegram import Update, Chat, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1071,6 +1071,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
+                # Ищем файл по префиксу trailer.
                 video_file = None
                 for f in os.listdir(tmpdir):
                     if f.startswith('trailer.'):
@@ -1111,9 +1112,9 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео) ===
+# === УПРОЩЁННАЯ КОМАНДА MUSIC (Spotify -> YouTube -> аудио) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск музыки через Spotify с выбором трека."""
+    """Поиск музыки через Spotify, берём первый трек, ищем на YouTube."""
     if not spotify:
         await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
         return
@@ -1126,70 +1127,33 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Ищу на Spotify: {query}...")
 
     try:
-        results = spotify.search(q=query, type='track', limit=5)
+        results = spotify.search(q=query, type='track', limit=1)  # берём только первый трек
         tracks = results.get('tracks', {}).get('items', [])
 
         if not tracks:
-            await status_msg.edit_text(f"❌ Ничего не найдено.")
+            await status_msg.edit_text(f"❌ Ничего не найдено на Spotify.")
             return
 
-        context.user_data['music_tracks'] = tracks
+        track = tracks[0]
+        track_name = track['name']
+        artists = ', '.join([a['name'] for a in track['artists']])
+        duration = track['duration_ms'] // 1000
+        spotify_url = track['external_urls']['spotify']
 
-        lines = [f"🎵 *Найдено {len(tracks)} треков:*\n"]
-        keyboard = []
-        for i, track in enumerate(tracks):
-            name = track['name']
-            artists = ', '.join([a['name'] for a in track['artists']])
-            duration_ms = track['duration_ms']
-            minutes = duration_ms // 60000
-            seconds = (duration_ms % 60000) // 1000
-            lines.append(f"{i+1}. **{name}** — {artists} ({minutes}:{seconds:02d})")
-            keyboard.append([InlineKeyboardButton(f"🎵 {i+1}", callback_data=f"music_select_{i}")])
+        # Сохраняем данные трека
+        context.user_data['music_track_name'] = track_name
+        context.user_data['music_artists'] = artists
+        context.user_data['music_duration'] = duration
+        context.user_data['music_spotify_url'] = spotify_url
 
-        text = "\n".join(lines)
-        await status_msg.edit_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        # Ищем видео на YouTube
+        search_query = f"{track_name} {artists} official audio"
+        await status_msg.edit_text(f"🔍 Ищу на YouTube: {search_query}...")
 
-    except Exception as e:
-        logger.error(f"Ошибка Spotify API: {e}")
-        await status_msg.edit_text(f"❌ Ошибка при поиске: {e}")
+        if not youtube:
+            await status_msg.edit_text("❌ YouTube API не настроен.")
+            return
 
-# === ОБРАБОТЧИК ВЫБОРА ТРЕКА (поиск видео на YouTube) ===
-async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """После выбора трека из Spotify – ищем видео на YouTube и предлагаем выбрать."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if not data.startswith("music_select_"):
-        return
-
-    try:
-        track_index = int(data.split("_")[2])
-    except (IndexError, ValueError):
-        await query.edit_message_text("❌ Ошибка выбора.")
-        return
-
-    tracks = context.user_data.get('music_tracks')
-    if not tracks or track_index >= len(tracks):
-        await query.edit_message_text("❌ Список треков устарел. Попробуйте заново /music.")
-        return
-
-    track = tracks[track_index]
-    track_name = track['name']
-    artists = ', '.join([a['name'] for a in track['artists']])
-
-    search_query = f"{track_name} {artists} official audio"
-    status_msg = await query.edit_message_text(f"🔍 Ищу на YouTube: {search_query}...")
-
-    if not youtube:
-        await status_msg.edit_text("❌ YouTube API не настроен.")
-        return
-
-    try:
         request = youtube.search().list(
             part="snippet",
             q=search_query,
@@ -1205,10 +1169,6 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         context.user_data['music_youtube_videos'] = items
-        context.user_data['music_track_name'] = track_name
-        context.user_data['music_artists'] = artists
-        context.user_data['music_spotify_url'] = track['external_urls']['spotify']
-        context.user_data['music_duration'] = track['duration_ms'] // 1000
 
         lines = [f"🎵 **{track_name}** — {artists}\nВыберите видео для скачивания:\n"]
         keyboard = []
@@ -1228,7 +1188,7 @@ async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     except Exception as e:
-        logger.error(f"Ошибка поиска YouTube для музыки: {e}")
+        logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
 # === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
@@ -1265,7 +1225,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     ydl_opts = {
         'format': 'bestaudio',
-        'outtmpl': '%(title)s.%(ext)s',  # временно используем оригинальное имя
+        'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -1286,7 +1246,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Сохраняем с оригинальным названием, чтобы не терять расширение
             ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
@@ -1299,7 +1258,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем любой файл в tmpdir (не папку) с размером > 1KB
+                # Ищем любой файл (не папку) размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1340,6 +1299,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
+
 # === ОБРАБОТЧИК ОТМЕНЫ ДЛЯ МУЗЫКИ ===
 async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2059,19 +2019,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (только русские, группы) ===
-        if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and user_id != context.bot.id:
-            if re.search(r'[а-яА-Я]', text):
-                reaction = get_reaction_for_text(text)
-                if reaction:
-                    try:
-                        await context.bot.set_message_reaction(
-                            chat_id=chat_id,
-                            message_id=message.message_id,
-                            reaction=[ReactionTypeEmoji(emoji=reaction)]
-                        )
-                    except Exception as e:
-                        logger.warning(f"Не удалось поставить реакцию: {e}")
+        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (отключены, т.к. вызывают ошибку) ===
+        # if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and user_id != context.bot.id:
+        #     if re.search(r'[а-яА-Я]', text):
+        #         reaction = get_reaction_for_text(text)
+        #         if reaction:
+        #             try:
+        #                 await context.bot.set_message_reaction(
+        #                     chat_id=chat_id,
+        #                     message_id=message.message_id,
+        #                     reaction=[ReactionTypeEmoji(emoji=reaction)]
+        #                 )
+        #             except Exception as e:
+        #                 logger.warning(f"Не удалось поставить реакцию: {e}")
 
         # ===== 1. ЗАПОМНИ ИМЯ =====
         is_name_command = False
@@ -2571,13 +2531,12 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # ❗ Специфичные обработчики ДО общего button_callback
+    # ❗ Специфичные обработчики для трейлеров и музыки
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
-    application.add_handler(CallbackQueryHandler(music_select_callback, pattern="^music_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
 
-    # Общий обработчик кнопок главного меню и админки – после специфичных
+    # Общий обработчик кнопок главного меню и админки
     application.add_handler(CallbackQueryHandler(button_callback))
 
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
@@ -2616,8 +2575,8 @@ def main():
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("stats_detail", "Подробная статистика (владелец)"),
-            BotCommand("music", "Поиск и выбор музыки (аудио)"),
-            BotCommand("trailer", "Поиск и скачивание трейлеров (MP4)"),
+            BotCommand("music", "Поиск музыки (аудио)"),
+            BotCommand("trailer", "Поиск трейлеров (MP4)"),
             BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
             BotCommand("setmode", "Глобальный режим (владелец)"),
@@ -2645,7 +2604,7 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (аудио)!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
