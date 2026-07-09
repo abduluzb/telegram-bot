@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4), выбором музыки (MP3), админ-панелью и всеми функциями
-# Увеличенные таймауты, обработка больших файлов, обход капчи YouTube
+# bot.py - Luna AI с трейлерами (MP4), выбором музыки, админ-панелью и всеми функциями
+# Увеличенные таймауты, обработка больших файлов
 
 import os
 import asyncio
@@ -767,7 +767,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
         "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
-        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю MP3)\n\n"
+        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -1047,7 +1047,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         },
         'extractor_args': {
             'youtube': {
-                'skip': ['webpage', 'hls', 'dash'],   # обход капчи
+                'skip': ['webpage', 'hls', 'dash'],
                 'player_client': ['android'],
             }
         },
@@ -1111,7 +1111,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео, конвертация в MP3) ===
+# === УЛУЧШЕННАЯ КОМАНДА MUSIC (с выбором трека и видео) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Поиск музыки через Spotify с выбором трека."""
     if not spotify:
@@ -1157,6 +1157,81 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка Spotify API: {e}")
         await status_msg.edit_text(f"❌ Ошибка при поиске: {e}")
 
+# === ОБРАБОТЧИК ВЫБОРА ТРЕКА (поиск видео на YouTube) ===
+async def music_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """После выбора трека из Spotify – ищем видео на YouTube и предлагаем выбрать."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if not data.startswith("music_select_"):
+        return
+
+    try:
+        track_index = int(data.split("_")[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text("❌ Ошибка выбора.")
+        return
+
+    tracks = context.user_data.get('music_tracks')
+    if not tracks or track_index >= len(tracks):
+        await query.edit_message_text("❌ Список треков устарел. Попробуйте заново /music.")
+        return
+
+    track = tracks[track_index]
+    track_name = track['name']
+    artists = ', '.join([a['name'] for a in track['artists']])
+
+    search_query = f"{track_name} {artists} official audio"
+    status_msg = await query.edit_message_text(f"🔍 Ищу на YouTube: {search_query}...")
+
+    if not youtube:
+        await status_msg.edit_text("❌ YouTube API не настроен.")
+        return
+
+    try:
+        request = youtube.search().list(
+            part="snippet",
+            q=search_query,
+            type="video",
+            maxResults=5,
+            order="relevance"
+        )
+        response = request.execute()
+        items = response.get("items", [])
+
+        if not items:
+            await status_msg.edit_text(f"❌ Не найдено видео на YouTube для '{track_name}'.")
+            return
+
+        context.user_data['music_youtube_videos'] = items
+        context.user_data['music_track_name'] = track_name
+        context.user_data['music_artists'] = artists
+        context.user_data['music_spotify_url'] = track['external_urls']['spotify']
+        context.user_data['music_duration'] = track['duration_ms'] // 1000
+
+        lines = [f"🎵 **{track_name}** — {artists}\nВыберите видео для скачивания:\n"]
+        keyboard = []
+        for i, item in enumerate(items, 1):
+            title = item["snippet"]["title"]
+            channel = item["snippet"]["channelTitle"]
+            lines.append(f"{i}. {title} (канал: {channel})")
+            keyboard.append([InlineKeyboardButton(f"▶️ {i}", callback_data=f"music_yt_select_{i-1}")])
+
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="music_cancel")])
+
+        text = "\n".join(lines)
+        await status_msg.edit_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка поиска YouTube для музыки: {e}")
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
+
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Скачивает аудио выбранного видео с YouTube и отправляет."""
     query = update.callback_query
@@ -1189,7 +1264,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
     ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio',  # предпочитаем m4a, иначе любой аудио
+        'format': 'bestaudio[ext=m4a]/bestaudio',
         'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
@@ -2539,7 +2614,7 @@ def main():
             BotCommand("members", "Участники чата"),
             BotCommand("stats", "Статистика"),
             BotCommand("stats_detail", "Подробная статистика (владелец)"),
-            BotCommand("music", "Поиск и выбор музыки (MP3)"),
+            BotCommand("music", "Поиск и выбор музыки (аудио)"),
             BotCommand("trailer", "Поиск и скачивание трейлеров (MP4)"),
             BotCommand("getmode", "Текущий режим"),
             BotCommand("setmoderation", "Управление модерацией (владелец)"),
@@ -2568,7 +2643,7 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (MP3)!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (аудио)!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
