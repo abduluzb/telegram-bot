@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио)
-# Админ-панель полностью без Markdown (parse_mode=None) для всех сообщений.
+# Админ-панель без удаления сообщения, исправлена обработка ответов.
 
 import os
 import asyncio
@@ -482,7 +482,7 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ===== АДМИН-ПАНЕЛЬ (все сообщения без Markdown) =====
+# ===== АДМИН-ПАНЕЛЬ =====
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
     keyboard = []
     row1 = []
@@ -551,13 +551,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admin_write_text":
         user_data['admin_waiting'] = 'text'
+        # Не удаляем сообщение, а просто редактируем
         await query.edit_message_text(
             "✏️ Введите текст рассылки\n\n"
             "Просто напишите сообщение в этот чат. Я сохраню его.\n"
             "Чтобы отменить, нажмите /cancel_admin",
             parse_mode=None
         )
-        await query.message.delete()
 
     elif data == "admin_add_photo":
         user_data['admin_waiting'] = 'photo'
@@ -567,7 +567,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Чтобы пропустить, нажмите /skip_photo",
             parse_mode=None
         )
-        await query.message.delete()
 
     elif data == "admin_clear":
         user_data['admin_text'] = None
@@ -732,6 +731,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     context.user_data['admin_waiting'] = None
     logger.info(f"✅ Текст сохранён: {text[:100]}...")
 
+    # Возвращаем панель
     panel_id = context.user_data.get('admin_panel_message_id')
     if panel_id:
         try:
@@ -746,6 +746,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             return
         except Exception as e:
             logger.error(f"Ошибка редактирования панели: {e}")
+            # Если не удалось, отправляем новое сообщение
             await update.message.reply_text(
                 f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
                 reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id'))),
