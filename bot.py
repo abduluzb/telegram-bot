@@ -720,7 +720,9 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
+    # Если не ждём текст, передаём управление основному обработчику
     if context.user_data.get('admin_waiting') != 'text':
+        await handle_message(update, context)
         return
 
     text = update.message.text
@@ -764,7 +766,9 @@ async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
+    # Если не ждём фото, передаём управление основному обработчику (но фото не обрабатывается handle_message, поэтому можно просто вернуть)
     if context.user_data.get('admin_waiting') != 'photo':
+        # Для фото основного обработчика нет, поэтому просто игнорируем
         return
 
     photo = update.message.photo
