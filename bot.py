@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через извлечение из видео)
-# Исправлена админ-панель: текст сохраняется и панель обновляется.
+# Исправлена админ-панель: без ConversationHandler, работает стабильно.
 
 import os
 import asyncio
@@ -30,7 +30,6 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ChatJoinRequestHandler,
-    ConversationHandler,
     filters,
     ContextTypes,
 )
@@ -151,8 +150,6 @@ user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
 user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
-
-WAITING_TEXT, WAITING_PHOTO, CONFIRM = range(3)
 
 # === Вспомогательные функции ===
 def get_user_timezone(timezone_str: str):
@@ -485,7 +482,7 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ===== АДМИН-ПАНЕЛЬ =====
+# ===== АДМИН-ПАНЕЛЬ (новая версия, без ConversationHandler) =====
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
     keyboard = []
     row1 = []
@@ -514,14 +511,17 @@ def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> Inlin
     return InlineKeyboardMarkup(keyboard)
 
 async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открывает админ-панель."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.effective_message.reply_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
+        return
 
+    # Инициализируем данные
     context.user_data['admin_text'] = None
     context.user_data['admin_photo'] = None
     context.user_data['admin_photo_file_id'] = None
+    context.user_data['admin_waiting'] = None  # 'text' или 'photo'
 
     text = (
         "👑 *Админ-панель Luna AI*\n\n"
@@ -532,55 +532,52 @@ async def admin_panel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Текущий статус:"
     )
     status = "📝 Текст: не задан\n🖼️ Фото: нет"
-    msg = await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=text + "\n\n" + status,
+    msg = await update.effective_message.reply_text(
+        text + "\n\n" + status,
         reply_markup=get_admin_keyboard(False, False),
         parse_mode='Markdown'
     )
-    # Сохраняем ID сообщения панели, чтобы потом редактировать
     context.user_data['admin_panel_message_id'] = msg.message_id
-    return ConversationHandler.END
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает кнопки админ-панели."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await query.edit_message_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
+        return
 
     data = query.data
     user_data = context.user_data
+    panel_id = user_data.get('admin_panel_message_id')
 
     if data == "admin_write_text":
-        # Сохраняем ID сообщения панели, чтобы потом отредактировать его
-        user_data['admin_edit_message_id'] = query.message.message_id
+        user_data['admin_waiting'] = 'text'
         await query.edit_message_text(
             "✏️ *Введите текст рассылки*\n\n"
             "Просто напишите сообщение в этот чат. Я сохраню его.\n"
-            "Чтобы отменить, нажмите /cancel",
+            "Чтобы отменить, нажмите /cancel_admin",
             parse_mode='Markdown'
         )
-        return WAITING_TEXT
+        # Удаляем сообщение с кнопками, чтобы не мешало
+        await query.message.delete()
 
     elif data == "admin_add_photo":
-        # Сохраняем ID сообщения панели
-        user_data['admin_edit_message_id'] = query.message.message_id
+        user_data['admin_waiting'] = 'photo'
         await query.edit_message_text(
             "🖼️ *Прикрепите фото*\n\n"
             "Отправьте мне фото (одно). Я сохраню его.\n"
-            "Чтобы пропустить, нажмите /skip",
+            "Чтобы пропустить, нажмите /skip_photo",
             parse_mode='Markdown'
         )
-        return WAITING_PHOTO
+        await query.message.delete()
 
     elif data == "admin_clear":
         user_data['admin_text'] = None
         user_data['admin_photo'] = None
         user_data['admin_photo_file_id'] = None
-        # Если есть ID панели, редактируем
-        panel_id = user_data.get('admin_panel_message_id')
+        user_data['admin_waiting'] = None
         if panel_id:
             try:
                 await context.bot.edit_message_text(
@@ -591,15 +588,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='Markdown'
                 )
                 await query.delete_message()
-                return ConversationHandler.END
+                return
             except:
                 pass
         await query.edit_message_text(
-            "🗑️ *Все данные очищены.*\n\nВозвращаюсь в панель.",
+            "🗑️ *Все данные очищены.*",
             reply_markup=get_admin_keyboard(False, False),
             parse_mode='Markdown'
         )
-        return ConversationHandler.END
 
     elif data == "admin_preview":
         text = user_data.get('admin_text', '')
@@ -609,7 +605,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Нет данных для предпросмотра.\nЗадайте текст или добавьте фото.",
                 reply_markup=get_admin_keyboard(False, False)
             )
-            return ConversationHandler.END
+            return
         preview_text = "👀 *Предпросмотр рассылки*\n\n"
         if text:
             preview_text += f"📝 *Текст:*\n{text}\n\n"
@@ -624,19 +620,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text(preview_text, parse_mode='Markdown')
         await query.answer()
-        return ConversationHandler.END
 
     elif data == "admin_send":
         text = user_data.get('admin_text', '')
         photo = user_data.get('admin_photo_file_id')
         if not text and not photo:
             await query.edit_message_text("❌ Нет данных для отправки.", reply_markup=get_admin_keyboard(False, False))
-            return ConversationHandler.END
+            return
 
         all_chats = list(chat_members.keys())
         if not all_chats:
             await query.edit_message_text("📭 Нет известных чатов.", reply_markup=get_admin_keyboard(False, False))
-            return ConversationHandler.END
+            return
 
         status_msg = await query.edit_message_text(f"⏳ Отправляю рассылку в {len(all_chats)} чатов...")
         success = 0
@@ -688,36 +683,50 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Ошибок: {errors}",
             reply_markup=get_admin_keyboard(False, False)
         )
+        # Очищаем данные после отправки
         user_data['admin_text'] = None
         user_data['admin_photo'] = None
         user_data['admin_photo_file_id'] = None
-        return ConversationHandler.END
 
     elif data == "admin_close":
+        user_data['admin_text'] = None
+        user_data['admin_photo'] = None
+        user_data['admin_photo_file_id'] = None
+        user_data['admin_waiting'] = None
         await query.edit_message_text("🔙 Панель закрыта.")
-        return ConversationHandler.END
+        if panel_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=panel_id
+                )
+            except:
+                pass
 
     elif data in ("admin_text_set", "admin_photo_set"):
         await query.answer("Уже задано")
-        return ConversationHandler.END
 
-async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработчики для ввода текста и фото из админ-панели
+async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает текст для рассылки."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
+        return
+
+    if context.user_data.get('admin_waiting') != 'text':
+        return  # не ждём текст
 
     text = update.message.text
     if text.startswith('/'):
         await update.message.reply_text("❌ Команды не принимаются. Напишите текст.")
-        return WAITING_TEXT
+        return
 
-    user_data = context.user_data
-    user_data['admin_text'] = text
+    context.user_data['admin_text'] = text
+    context.user_data['admin_waiting'] = None
     logger.info(f"✅ Текст сохранён: {text[:100]}...")
 
-    # Редактируем исходное сообщение панели
-    panel_id = user_data.get('admin_edit_message_id')
+    panel_id = context.user_data.get('admin_panel_message_id')
     if panel_id:
         try:
             await context.bot.edit_message_text(
@@ -725,106 +734,75 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=panel_id,
                 text=f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
                      "Возвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
             )
-            # Удаляем сообщение пользователя с текстом
             await update.message.delete()
-            return ConversationHandler.END
+            return
         except Exception as e:
             logger.error(f"Ошибка редактирования панели: {e}")
-            # Если не удалось, отправляем новое сообщение
             await update.message.reply_text(
-                f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
-                "Возвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+                f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
+                reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
             )
-            return ConversationHandler.END
     else:
-        # Если ID нет, просто отвечаем
         await update.message.reply_text(
-            f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}\n\n"
-            "Возвращаюсь в панель.",
-            reply_markup=get_admin_keyboard(True, bool(user_data.get('admin_photo_file_id')))
+            f"✅ Текст сохранён:\n\n{text[:200]}{'...' if len(text)>200 else ''}",
+            reply_markup=get_admin_keyboard(True, bool(context.user_data.get('admin_photo_file_id')))
         )
-        return ConversationHandler.END
 
-async def handle_admin_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принимает фото для рассылки."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
+        return
+
+    if context.user_data.get('admin_waiting') != 'photo':
+        return
 
     photo = update.message.photo
     if not photo:
         await update.message.reply_text("❌ Отправьте фото (не документ). Попробуйте снова.")
-        return WAITING_PHOTO
+        return
 
     photo_file = photo[-1]
-    user_data = context.user_data
-    user_data['admin_photo_file_id'] = photo_file.file_id
-    user_data['admin_photo'] = photo_file
+    context.user_data['admin_photo_file_id'] = photo_file.file_id
+    context.user_data['admin_photo'] = photo_file
+    context.user_data['admin_waiting'] = None
     logger.info("✅ Фото сохранено")
 
-    panel_id = user_data.get('admin_edit_message_id')
+    panel_id = context.user_data.get('admin_panel_message_id')
     if panel_id:
         try:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=panel_id,
                 text="✅ Фото сохранено.\n\nВозвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
             )
             await update.message.delete()
-            return ConversationHandler.END
+            return
         except Exception as e:
             logger.error(f"Ошибка редактирования панели: {e}")
             await update.message.reply_text(
-                "✅ Фото сохранено.\n\nВозвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+                "✅ Фото сохранено.",
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
             )
-            return ConversationHandler.END
     else:
         await update.message.reply_text(
-            "✅ Фото сохранено.\n\nВозвращаюсь в панель.",
-            reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), True)
+            "✅ Фото сохранено.",
+            reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), True)
         )
-        return ConversationHandler.END
 
-async def skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отменяет ввод текста/фото и возвращает в панель."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
+        return
 
-    user_data = context.user_data
-    panel_id = user_data.get('admin_edit_message_id')
-    if panel_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=panel_id,
-                text="⏭️ Фото пропущено. Возвращаюсь в панель.",
-                reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), False)
-            )
-            await update.message.delete()
-            return ConversationHandler.END
-        except:
-            pass
-
-    await update.message.reply_text(
-        "⏭️ Фото пропущено. Возвращаюсь в панель.",
-        reply_markup=get_admin_keyboard(bool(user_data.get('admin_text')), False)
-    )
-    return ConversationHandler.END
-
-async def cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not is_owner(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
-        return ConversationHandler.END
-
-    user_data = context.user_data
-    panel_id = user_data.get('admin_edit_message_id')
+    context.user_data['admin_waiting'] = None
+    panel_id = context.user_data.get('admin_panel_message_id')
     if panel_id:
         try:
             await context.bot.edit_message_text(
@@ -832,23 +810,50 @@ async def cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=panel_id,
                 text="❌ Отменено. Возвращаюсь в панель.",
                 reply_markup=get_admin_keyboard(
-                    bool(user_data.get('admin_text')),
-                    bool(user_data.get('admin_photo_file_id'))
+                    bool(context.user_data.get('admin_text')),
+                    bool(context.user_data.get('admin_photo_file_id'))
                 )
             )
             await update.message.delete()
-            return ConversationHandler.END
+            return
         except:
             pass
-
     await update.message.reply_text(
-        "❌ Отменено. Возвращаюсь в панель.",
+        "❌ Отменено.",
         reply_markup=get_admin_keyboard(
-            bool(user_data.get('admin_text')),
-            bool(user_data.get('admin_photo_file_id'))
+            bool(context.user_data.get('admin_text')),
+            bool(context.user_data.get('admin_photo_file_id'))
         )
     )
-    return ConversationHandler.END
+
+async def skip_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пропускает добавление фото."""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
+        return
+
+    if context.user_data.get('admin_waiting') != 'photo':
+        return
+
+    context.user_data['admin_waiting'] = None
+    panel_id = context.user_data.get('admin_panel_message_id')
+    if panel_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=panel_id,
+                text="⏭️ Фото пропущено. Возвращаюсь в панель.",
+                reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False)
+            )
+            await update.message.delete()
+            return
+        except:
+            pass
+    await update.message.reply_text(
+        "⏭️ Фото пропущено.",
+        reply_markup=get_admin_keyboard(bool(context.user_data.get('admin_text')), False)
+    )
 
 # ===== КОМАНДЫ =====
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2130,8 +2135,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         add_chat_memory(chat_id, user_id, user_name, text, role="user")
         add_chat_member(chat_id, user_id, user_name)
 
-        # === АВТОМАТИЧЕСКИЕ РЕАКЦИИ (отключены) ===
-
         # ===== 1. ЗАПОМНИ ИМЯ =====
         is_name_command = False
         custom_name = None
@@ -2580,31 +2583,7 @@ def main():
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    admin_conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("admin", admin_command),
-            CallbackQueryHandler(admin_callback, pattern="^admin_"),
-        ],
-        states={
-            WAITING_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text),
-                CommandHandler("cancel", cancel_admin),
-            ],
-            WAITING_PHOTO: [
-                MessageHandler(filters.PHOTO, handle_admin_photo),
-                CommandHandler("skip", skip_photo),
-                CommandHandler("cancel", cancel_admin),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel_admin),
-            MessageHandler(filters.ALL, cancel_admin),
-        ],
-        per_user=True,
-        per_message=True,
-    )
-    application.add_handler(admin_conv_handler)
-
+    # Команды
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset_command))
@@ -2630,11 +2609,20 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
+    # Админ-панель (без ConversationHandler)
+    application.add_handler(CommandHandler("admin", admin_panel_start))
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text_input))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_admin_photo_input))
+    application.add_handler(CommandHandler("cancel_admin", cancel_admin_input))
+    application.add_handler(CommandHandler("skip_photo", skip_photo_input))
+
     # Специфичные обработчики
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
 
+    # Общий обработчик кнопок (главное меню, админка старая, и т.д.)
     application.add_handler(CallbackQueryHandler(button_callback))
 
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
