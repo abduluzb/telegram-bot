@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, и скачиванием Instagram видео
-# Добавлена поддержка Instagram ссылок через yt-dlp
+# Исправлена ошибка поиска файла Instagram
 
 import os
 import asyncio
@@ -221,7 +221,6 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
 # ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
-# ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
 def is_instagram_url(text: str) -> bool:
     """Проверяет, является ли текст ссылкой на Instagram."""
     patterns = [
@@ -261,15 +260,27 @@ async def download_instagram_video(url: str) -> Optional[str]:
                 )
                 await asyncio.wait_for(download_task, timeout=120)
                 
-                # Ищем любой файл в tmpdir (не папку) размером > 1KB
+                # Ищем любой видеофайл в tmpdir
                 video_file = None
+                video_extensions = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'mpg', 'mpeg']
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
                     if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
-                        video_file = full_path
-                        break
+                        ext = f.split('.')[-1].lower() if '.' in f else ''
+                        if ext in video_extensions:
+                            video_file = full_path
+                            break
+                
+                # Если не нашли по расширению, берём первый попавшийся файл (кроме .part)
+                if not video_file:
+                    for f in os.listdir(tmpdir):
+                        full_path = os.path.join(tmpdir, f)
+                        if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024 and not f.endswith('.part'):
+                            video_file = full_path
+                            break
                 
                 if not video_file:
+                    logger.error(f"Не найден файл в tmpdir: {os.listdir(tmpdir)}")
                     return None
                     
                 return video_file
@@ -2159,7 +2170,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Ошибка отправки Instagram видео: {e}")
                     await status_msg.edit_text(f"❌ Ошибка при отправке видео: {e}")
                 finally:
-                    # Удаляем временный файл
                     try:
                         os.remove(video_path)
                     except:
