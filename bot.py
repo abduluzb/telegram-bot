@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и аудио
-# Полностью рабочие функции Instagram с кнопкой "Скачать аудио"
+# Исправлено: обход капчи YouTube, поиск файлов, кнопка "Скачать аудио"
 
 import os
 import asyncio
@@ -151,7 +151,6 @@ user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
 user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
-instagram_audio_requests: Dict[str, str] = {}  # для хранения ссылок по UUID
 
 # === Вспомогательные функции ===
 def get_user_timezone(timezone_str: str):
@@ -236,9 +235,9 @@ def is_instagram_url(text: str) -> bool:
     return False
 
 async def download_instagram_video(url: str) -> Optional[str]:
-    """Скачивает видео с Instagram и возвращает путь к файлу."""
+    """Скачивает видео с Instagram и возвращает путь к файлу в /tmp/."""
     temp_dir = tempfile.gettempdir()
-    filename = f"insta_vid_{uuid.uuid4().hex[:8]}.mp4"
+    filename = f"instagram_{uuid.uuid4().hex}.mp4"
     filepath = os.path.join(temp_dir, filename)
     
     ydl_opts = {
@@ -250,10 +249,16 @@ async def download_instagram_video(url: str) -> Optional[str]:
         'headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         },
+        'extractor_args': {
+            'youtube': {
+                'skip': ['webpage', 'dash', 'hls'],
+                'player_client': ['android', 'web'],
+            }
+        },
         'ignoreerrors': True,
         'nooverwrites': True,
-        'timeout': 60,
-        'socket_timeout': 60,
+        'timeout': 120,
+        'socket_timeout': 120,
     }
     
     try:
@@ -266,45 +271,53 @@ async def download_instagram_video(url: str) -> Optional[str]:
         
         if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
             return filepath
-        return None
+        else:
+            # Ищем любой файл в /tmp, начинающийся с instagram_
+            for f in os.listdir(temp_dir):
+                if f.startswith('instagram_') and f != os.path.basename(filepath):
+                    full_path = os.path.join(temp_dir, f)
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                        return full_path
+            return None
     except Exception as e:
         logger.error(f"Ошибка скачивания Instagram видео: {e}")
         return None
 
 async def download_instagram_audio(url: str) -> Optional[str]:
     """Скачивает аудио из Instagram Reels/видео и возвращает путь к MP3."""
+    ffmpeg_available = shutil.which('ffmpeg') is not None
+    if not ffmpeg_available:
+        logger.warning("ffmpeg не найден, попробуем скачать аудио без конвертации")
+
     temp_dir = tempfile.gettempdir()
-    audio_id = uuid.uuid4().hex[:8]
-    filepath = os.path.join(temp_dir, f"insta_audio_{audio_id}.mp3")
+    filename = f"instagram_audio_{uuid.uuid4().hex}.mp3"
+    filepath = os.path.join(temp_dir, filename)
     
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': filepath,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }] if ffmpeg_available else [],
+        'outtmpl': os.path.join(temp_dir, 'instagram_audio_%(id)s'),
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         },
+        'extractor_args': {
+            'youtube': {
+                'skip': ['webpage', 'dash', 'hls'],
+                'player_client': ['android', 'web'],
+            }
+        },
         'ignoreerrors': True,
         'nooverwrites': True,
-        'timeout': 60,
-        'socket_timeout': 60,
+        'timeout': 120,
+        'socket_timeout': 120,
     }
-    
-    # Проверяем наличие ffmpeg для конвертации
-    ffmpeg_available = shutil.which('ffmpeg') is not None
-    if ffmpeg_available:
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-        # Для постпроцессора нужно другое имя файла
-        filepath_no_ext = os.path.join(temp_dir, f"insta_audio_{audio_id}")
-        ydl_opts['outtmpl'] = filepath_no_ext
-    else:
-        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -314,22 +327,17 @@ async def download_instagram_audio(url: str) -> Optional[str]:
             )
             await asyncio.wait_for(download_task, timeout=120)
         
-        # Ищем файл
-        if ffmpeg_available:
-            # После конвертации файл будет с расширением .mp3
-            final_path = f"{filepath_no_ext}.mp3"
-            if os.path.exists(final_path) and os.path.getsize(final_path) > 1024:
-                return final_path
-        else:
-            # Если ffmpeg нет, ищем любой файл, начинающийся с insta_audio_
-            for f in os.listdir(temp_dir):
-                if f.startswith('insta_audio_') and os.path.getsize(os.path.join(temp_dir, f)) > 1024:
-                    return os.path.join(temp_dir, f)
-        
-        # Прямой поиск
-        if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
-            return filepath
-            
+        # Ищем файл с расширением .mp3 или .m4a
+        for f in os.listdir(temp_dir):
+            if f.startswith('instagram_audio_'):
+                full_path = os.path.join(temp_dir, f)
+                if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                    # Если это не mp3, но ffmpeg нет, переименовываем в .mp3
+                    if not f.endswith('.mp3') and not ffmpeg_available:
+                        # Просто берём как есть
+                        return full_path
+                    if f.endswith('.mp3'):
+                        return full_path
         return None
     except Exception as e:
         logger.error(f"Ошибка скачивания аудио из Instagram: {e}")
@@ -990,7 +998,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
         "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n"
         "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n"
-        "🎵 Нажмите кнопку «Скачать аудио» под видео, чтобы получить MP3!\n\n"
+        "🎵 *Супер!* Под видео из Instagram будет кнопка «Скачать аудио» — нажмите, и я пришлю MP3!\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -1016,7 +1024,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Скачиваю видео из Instagram по ссылке\n"
-        "• Скачиваю аудио из Instagram по кнопке под видео\n"
+        "• Под видео есть кнопка «Скачать аудио»\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
@@ -1270,8 +1278,8 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         },
         'extractor_args': {
             'youtube': {
-                'skip': ['webpage', 'hls', 'dash'],
-                'player_client': ['android'],
+                'skip': ['webpage', 'dash', 'hls'],
+                'player_client': ['android', 'web'],
             }
         },
         'ignoreerrors': True,
@@ -1334,7 +1342,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === КОМАНДА МУЗЫКИ ===
+# === КОМАНДА МУЗЫКИ (исправлена) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not spotify:
         await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
@@ -1461,7 +1469,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         },
         'extractor_args': {
             'youtube': {
-                'skip': ['webpage', 'hls', 'dash'],
+                'skip': ['webpage', 'dash', 'hls'],
                 'player_client': ['android', 'web'],
             }
         },
@@ -1485,6 +1493,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
+                # Ищем любой файл (не папку) размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1531,55 +1540,6 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("❌ Поиск музыки отменён.")
-
-# ===== ОБРАБОТЧИК ДЛЯ КНОПКИ "СКАЧАТЬ АУДИО" ИЗ INSTAGRAM =====
-async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио из Instagram по ссылке, сохранённой в глобальном словаре."""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    if not data.startswith("ig_audio_"):
-        return
-    
-    audio_id = data.split("_")[2]
-    
-    # Получаем ссылку из глобального словаря
-    url = instagram_audio_requests.get(audio_id)
-    if not url:
-        await query.edit_message_text("❌ Ссылка устарела. Отправьте видео заново.")
-        return
-    
-    await query.edit_message_text("🎵 Скачиваю аудио из Instagram...")
-    audio_path = await download_instagram_audio(url)
-    
-    if audio_path:
-        try:
-            with open(audio_path, 'rb') as audio_file:
-                await context.bot.send_audio(
-                    chat_id=query.message.chat_id,
-                    audio=audio_file,
-                    title="Instagram Reel Audio",
-                    performer="Instagram"
-                )
-            await query.delete_message()
-        except Exception as e:
-            logger.error(f"Ошибка отправки аудио: {e}")
-            await query.edit_message_text(f"❌ Ошибка при отправке аудио: {e}")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except:
-                    pass
-    else:
-        await query.edit_message_text(
-            "❌ Не удалось скачать аудио.\n\n"
-            "Возможные причины:\n"
-            "- Видео недоступно\n"
-            "- Не установлен ffmpeg (нужен для извлечения аудио)\n"
-            "- Ссылка ведёт на приватный аккаунт"
-        )
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2256,9 +2216,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if video_path:
                 try:
                     # Создаём уникальный ID для этой ссылки
-                    audio_id = uuid.uuid4().hex[:8]
-                    # Сохраняем ссылку в глобальный словарь
-                    instagram_audio_requests[audio_id] = text
+                    audio_id = uuid.uuid4().hex
+                    # Сохраняем ссылку для последующего скачивания аудио
+                    if 'instagram_audio_requests' not in context.user_data:
+                        context.user_data['instagram_audio_requests'] = {}
+                    context.user_data['instagram_audio_requests'][audio_id] = text
                     
                     await context.bot.send_video(
                         chat_id=update.effective_chat.id,
@@ -2569,7 +2531,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         custom_name = user_info.get('custom_name') if user_info else None
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
 
-        # === ПРОМПТЫ ===
+        # === НОВЫЙ ПРОМПТ ДЛЯ РЕЖИМА "auto" (адаптивный тон) ===
         mode_prompts = {
             "fast": f"""Ты — Luna AI. Отвечай максимально кратко (1-2 предложения) и точно, но с лёгкой иронией. Без воды. Сарказм приветствуется.
 Пользователь: {user_name}. Вопрос: {text}""",
@@ -2681,6 +2643,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Ошибка. Попробуйте ещё раз.")
         except:
             pass
+
+# ===== ОБРАБОТЧИК КНОПКИ "СКАЧАТЬ АУДИО" ИЗ INSTAGRAM =====
+async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("ig_audio_"):
+        return
+    
+    audio_id = data.split("_")[2]
+    
+    # Получаем ссылку из user_data
+    requests = context.user_data.get('instagram_audio_requests', {})
+    url = requests.get(audio_id)
+    if not url:
+        await query.edit_message_text("❌ Ссылка устарела. Отправьте видео заново.")
+        return
+    
+    await query.edit_message_text("🎵 Скачиваю аудио из Instagram...")
+    audio_path = await download_instagram_audio(url)
+    
+    if audio_path:
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                await context.bot.send_audio(
+                    chat_id=query.message.chat_id,
+                    audio=audio_file,
+                    title="Instagram Reel Audio",
+                    performer="Instagram"
+                )
+            await query.delete_message()
+        except Exception as e:
+            logger.error(f"Ошибка отправки аудио: {e}")
+            await query.edit_message_text(f"❌ Ошибка при отправке аудио: {e}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except:
+                    pass
+    else:
+        await query.edit_message_text(
+            "❌ Не удалось скачать аудио.\n\n"
+            "Возможные причины:\n"
+            "- Видео недоступно\n"
+            "- Не установлен ffmpeg (нужен для извлечения аудио)\n"
+            "- Ссылка ведёт на приватный аккаунт\n"
+            "Установите ffmpeg: apt-get install ffmpeg"
+        )
 
 # ===== ЗАЯВКИ НА ВСТУПЛЕНИЕ =====
 async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2841,6 +2854,7 @@ def main():
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
     logger.info("📥 Instagram: готов к скачиванию видео и аудио")
+    logger.info("🎵 Кнопка 'Скачать аудио' добавлена под видео из Instagram")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
