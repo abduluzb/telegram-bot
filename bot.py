@@ -1,5 +1,4 @@
-# bot.py - Luna AI с трейлерами (MP4), музыкой, и скачиванием Instagram видео
-# Исправлена ошибка: файл сохраняется в постоянную папку /tmp/
+# bot.py - Luna AI с трейлерами (MP4), музыкой, и скачиванием Instagram видео + аудио по кнопке
 
 import os
 import asyncio
@@ -275,7 +274,57 @@ async def download_instagram_video(url: str) -> Optional[str]:
                         return full_path
             return None
     except Exception as e:
-        logger.error(f"Ошибка скачивания Instagram: {e}")
+        logger.error(f"Ошибка скачивания Instagram видео: {e}")
+        return None
+
+async def download_instagram_audio(url: str) -> Optional[str]:
+    """Скачивает аудио из Instagram и возвращает путь к MP3."""
+    ffmpeg_available = shutil.which('ffmpeg') is not None
+    if not ffmpeg_available:
+        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
+        return None
+
+    temp_dir = tempfile.gettempdir()
+    filename = f"instagram_audio_{uuid.uuid4().hex}.mp3"
+    filepath = os.path.join(temp_dir, filename)
+    
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': os.path.join(temp_dir, 'instagram_audio_%(id)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 60,
+        'socket_timeout': 60,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            download_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: ydl.download([url])
+            )
+            await asyncio.wait_for(download_task, timeout=120)
+        
+        # Ищем файл с расширением .mp3
+        for f in os.listdir(temp_dir):
+            if f.startswith('instagram_audio_') and f.endswith('.mp3'):
+                full_path = os.path.join(temp_dir, f)
+                if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                    return full_path
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка скачивания аудио из Instagram: {e}")
         return None
 # ===== КОНЕЦ БЛОКА INSTAGRAM =====
 
@@ -932,7 +981,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "генерировать картинки, искать видео на YouTube и Instagram, и искать информацию в Википедии!\n\n"
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
         "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n"
-        "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n\n"
+        "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n"
+        "🎵 *Новое!* Под видео будет кнопка «Скачать музыку» — нажмите, и я извлеку аудио!\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -958,6 +1008,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Скачиваю видео из Instagram по ссылке\n"
+        "• Под видео есть кнопка для скачивания аудио\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
@@ -1472,6 +1523,102 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("❌ Поиск музыки отменён.")
+
+# ===== НОВАЯ КОМАНДА: СКАЧИВАНИЕ АУДИО ИЗ INSTAGRAM =====
+async def igaudio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивает аудио из Instagram Reels и отправляет как аудиофайл."""
+    if not context.args:
+        await update.message.reply_text(
+            "🎵 Использование: /igaudio <ссылка на Instagram Reel/видео>\n"
+            "Пример: /igaudio https://www.instagram.com/reel/DWJfGtxjMqV/"
+        )
+        return
+
+    url = context.args[0]
+    if not is_instagram_url(url):
+        await update.message.reply_text("❌ Это не похоже на ссылку Instagram.")
+        return
+
+    status_msg = await update.message.reply_text("🎵 Скачиваю аудио из Instagram...")
+    audio_path = await download_instagram_audio(url)
+
+    if audio_path:
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                await context.bot.send_audio(
+                    chat_id=update.effective_chat.id,
+                    audio=audio_file,
+                    title="Instagram Reel Audio",
+                    performer="Instagram"
+                )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Ошибка отправки аудио из Instagram: {e}")
+            await status_msg.edit_text(f"❌ Ошибка при отправке аудио: {e}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except:
+                    pass
+    else:
+        await status_msg.edit_text(
+            "❌ Не удалось скачать аудио. Проверьте ссылку.\n"
+            "Возможные причины:\n"
+            "- Ссылка ведёт на приватный аккаунт\n"
+            "- Видео недоступно\n"
+            "- Ссылка недействительна\n"
+            "- Не установлен ffmpeg (нужен для извлечения аудио)"
+        )
+
+# ===== ОБРАБОТЧИК КНОПКИ "СКАЧАТЬ МУЗЫКУ" ПОСЛЕ ВИДЕО INSTAGRAM =====
+async def ig_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатие кнопки 'Скачать музыку' под видео Instagram."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("ig_audio_"):
+        return
+    
+    # Извлекаем URL из callback_data
+    url = data.replace("ig_audio_", "")
+    
+    if not is_instagram_url(url):
+        await query.edit_message_text("❌ Ссылка недействительна.")
+        return
+    
+    await query.edit_message_text("🎵 Скачиваю аудио из Instagram...")
+    audio_path = await download_instagram_audio(url)
+    
+    if audio_path:
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                await context.bot.send_audio(
+                    chat_id=update.effective_chat.id,
+                    audio=audio_file,
+                    title="Instagram Reel Audio",
+                    performer="Instagram"
+                )
+            await query.delete_message()
+        except Exception as e:
+            logger.error(f"Ошибка отправки аудио из Instagram: {e}")
+            await query.edit_message_text(f"❌ Ошибка при отправке аудио: {e}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except:
+                    pass
+    else:
+        await query.edit_message_text(
+            "❌ Не удалось скачать аудио. Проверьте ссылку.\n"
+            "Возможные причины:\n"
+            "- Ссылка ведёт на приватный аккаунт\n"
+            "- Видео недоступно\n"
+            "- Ссылка недействительна\n"
+            "- Не установлен ffmpeg (нужен для извлечения аудио)"
+        )
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2147,18 +2294,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if video_path:
                 try:
+                    # Создаём кнопку для скачивания аудио
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎵 Скачать музыку", callback_data=f"ig_audio_{text}")]
+                    ])
+                    
                     with open(video_path, 'rb') as video_file:
                         await context.bot.send_video(
                             chat_id=update.effective_chat.id,
                             video=video_file,
-                            caption="🎬 Видео из Instagram"
+                            caption="🎬 Видео из Instagram\nНажмите кнопку ниже, чтобы скачать аудио",
+                            reply_markup=keyboard
                         )
                     await status_msg.delete()
                 except Exception as e:
                     logger.error(f"Ошибка отправки Instagram видео: {e}")
                     await status_msg.edit_text(f"❌ Ошибка при отправке видео: {e}")
                 finally:
-                    # Удаляем файл после отправки (даже если ошибка)
                     if video_path and os.path.exists(video_path):
                         try:
                             os.remove(video_path)
@@ -2636,6 +2788,7 @@ def main():
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("igaudio", igaudio_command))
 
     # === Админ-панель ===
     application.add_handler(CommandHandler("admin", admin_panel_start))
@@ -2649,6 +2802,7 @@ def main():
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
+    application.add_handler(CallbackQueryHandler(ig_audio_callback, pattern="^ig_audio_"))
 
     # === Общий callback-обработчик ===
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -2707,6 +2861,7 @@ def main():
             BotCommand("delnote", "Удалить заметку (id)"),
             BotCommand("broadcast", "Рассылка во все чаты (владелец)"),
             BotCommand("admin", "Админ-панель (владелец)"),
+            BotCommand("igaudio", "Скачать аудио из Instagram"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("✅ Команды установлены")
@@ -2721,11 +2876,11 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой и скачиванием Instagram!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой, Instagram видео и аудио!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
-    logger.info("📥 Instagram: готов к скачиванию")
+    logger.info("📥 Instagram: готов к скачиванию видео и аудио")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
