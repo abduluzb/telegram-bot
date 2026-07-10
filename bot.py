@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами и музыкой
-# Добавлено логирование всех входящих сообщений для отладки
+# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)
+# Исправлена админ-панель и обработка сообщений
 
 import os
 import asyncio
@@ -716,13 +716,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_owner(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
-        return
 
     # Если не ждём текст, передаём управление основному обработчику
     if context.user_data.get('admin_waiting') != 'text':
         await handle_message(update, context)
+        return
+
+    # Если ждём текст, проверяем, что это владелец
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
     text = update.message.text
@@ -762,13 +764,14 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not is_owner(user_id):
-        await update.message.reply_text("⛔ Доступ запрещён.")
+
+    # Если не ждём фото, просто игнорируем (фото не обрабатываются основной логикой)
+    if context.user_data.get('admin_waiting') != 'photo':
         return
 
-    # Если не ждём фото, передаём управление основному обработчику (но фото не обрабатывается handle_message, поэтому можно просто вернуть)
-    if context.user_data.get('admin_waiting') != 'photo':
-        # Для фото основного обработчика нет, поэтому просто игнорируем
+    # Если ждём фото, проверяем владельца
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Доступ запрещён.")
         return
 
     photo = update.message.photo
@@ -2560,14 +2563,7 @@ def main():
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # === ВРЕМЕННЫЙ ОБРАБОТЧИК ДЛЯ ЛОГИРОВАНИЯ ВСЕХ СООБЩЕНИЙ ===
-    async def log_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        logger.info(f"🔥 LOG_ALL: получил обновление типа {update}")
-        if update.message:
-            logger.info(f"🔥 LOG_ALL: сообщение: {update.message.text}")
-    application.add_handler(MessageHandler(filters.ALL, log_all), group=0)
-
-    # Команды
+    # === Команды ===
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset_command))
@@ -2593,7 +2589,7 @@ def main():
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
 
-    # Админ-панель
+    # === Админ-панель ===
     application.add_handler(CommandHandler("admin", admin_panel_start))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text_input))
@@ -2601,16 +2597,19 @@ def main():
     application.add_handler(CommandHandler("cancel_admin", cancel_admin_input))
     application.add_handler(CommandHandler("skip_photo", skip_photo_input))
 
-    # Специфичные обработчики
+    # === Специфичные callback-обработчики ===
     application.add_handler(CallbackQueryHandler(trailer_select_callback, pattern="^trailer_select_"))
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
 
-    # Общий обработчик кнопок
+    # === Общий callback-обработчик ===
     application.add_handler(CallbackQueryHandler(button_callback))
 
-    application.add_handler(ChatJoinRequestHandler(join_request_callback))
+    # === Обработчик входящих сообщений (ставим последним) ===
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # === Запросы на вступление ===
+    application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
     async def post_init(app: Application):
         global OWNER_NAME
