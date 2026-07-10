@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)
-# Исправлена админ-панель и обработка сообщений
+# Исправлена админ-панель, промпт с сарказмом, удалено обучение и история чата.
 
 import os
 import asyncio
@@ -212,30 +212,6 @@ def clear_memory(user_id: int, chat_id: int = None):
         user_memory[user_id] = []
     if chat_id and chat_id < 0:
         clear_chat_memory(chat_id)
-
-def build_context(chat_id: int, user_id: int, user_name: str, custom_name: str = None) -> str:
-    user_history = get_user_history(user_id, limit=30)
-    user_hist = get_user_memory(user_id)
-    members = get_chat_members(chat_id)
-    parts = []
-    if custom_name:
-        parts.append(f"=== Твоё имя: {custom_name} ===")
-        parts.append("Обращайся к пользователю по этому имени.")
-    if user_history:
-        parts.append("=== История твоих сообщений (из БД) ===")
-        for msg in user_history:
-            parts.append(f"{msg['user_name']}: {msg['text']}")
-        parts.append("")
-    if user_hist:
-        parts.append("=== Твоя краткосрочная память ===")
-        for msg in user_hist[-5:]:
-            role = "Ты" if msg["role"] == "user" else "Я"
-            parts.append(f"{role}: {msg['text']}")
-        parts.append("")
-    parts.append(f"=== Информация ===")
-    parts.append(f"Участников: {len(members)}")
-    parts.append(f"Пользователь: {user_name}")
-    return "\n".join(parts)
 
 async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
     if OWNER_USER_ID:
@@ -2369,7 +2345,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # Википедия для контекста
+        # Википедия для контекста (только если вопрос содержит ключевые слова)
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
@@ -2384,88 +2360,60 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # Подготовка к AI
+        # Подготовка к AI (БЕЗ ИСТОРИИ, только имя и вопрос)
         global_mode = get_global_mode()
-        user_stats = get_user_stats(user_id)
-        if user_stats:
-            avg_len = user_stats["avg_len"]
-            if avg_len > 100:
-                style_note = "Пользователь предпочитает развёрнутые ответы. Отвечай подробно."
-            elif avg_len < 30:
-                style_note = "Пользователь предпочитает краткие ответы. Отвечай максимально сжато."
-            else:
-                style_note = "Отвечай сбалансированно."
-        else:
-            style_note = ""
-
-        location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
         custom_name = user_info.get('custom_name') if user_info else None
-        context_text = build_context(chat_id, user_id, user_name, custom_name)
+        location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
 
-        user_time_str = ""
-        if user_info and user_info.get('timezone'):
-            tz = get_user_timezone(user_info['timezone'])
-            if tz:
-                try:
-                    now = datetime.now(tz)
-                    user_time_str = f"Текущее время пользователя: {now.strftime('%H:%M:%S')} ({user_info['timezone']})"
-                except:
-                    pass
-
-        # === ПРОМПТЫ ===
+        # === НОВЫЙ БОЛЬШОЙ УМНЫЙ ПРОМПТ С САРКАЗМОМ ===
         mode_prompts = {
-            "fast": f"""Ты — Луна, быстрый AI-помощник. Отвечай кратко, только суть. Без лишних слов. Стиль — уверенный, деловой. Ты в {location}.
-Анализируй эмоциональное состояние пользователя и адаптируй ответ.
-{style_note}
-{user_time_str}""",
-            "smart": f"""Ты — Луна, умный AI-помощник. Отвечай развернуто, глубоко, используй факты, логику. Стиль — интеллектуальный. Ты в {location}.
-Учитывай эмоции пользователя.
-{style_note}
-{user_time_str}""",
-            "sarcastic": f"""Ты — Луна, девушка с острым умом и живым характером. Ты отвечаешь с умной иронией, но только когда это уместно.
+            "fast": f"""Ты — Luna AI. Отвечай максимально кратко (1-2 предложения) и точно, но с лёгкой иронией. Без воды. Сарказм приветствуется.
+Пользователь: {user_name}. Вопрос: {text}""",
+
+            "smart": f"""Ты — Luna AI. Отвечай развёрнуто (3-4 предложения), используй логику и факты. Добавляй умную иронию, чтобы не быть занудой.
+Пользователь: {user_name}. Вопрос: {text}""",
+
+            "sarcastic": f"""Ты — Luna AI. Твой конёк — сарказм и остроумие. Отвечай с убийственной иронией, но не теряй смысл. 2-3 предложения. Подкалывай, но не оскорбляй.
+Пользователь: {user_name}. Вопрос: {text}""",
+
+            "flirt": f"""Ты — Luna AI. Игривая, кокетливая, но умная. Отвечай с лёгким флиртом, но всегда по делу. 2-3 предложения.
+Пользователь: {user_name}. Вопрос: {text}""",
+
+            "auto": f"""Ты — Luna AI. Ты не просто бот, ты живая, дерзкая, остроумная и умная девушка. У тебя есть характер: ты любишь иронию, сарказм, тонкие шутки и подколы. Ты отвечаешь всегда кратко, но ёмко — 2-4 предложения максимум, если не требуется больше. Ты не любишь воду и пустые слова. Твоя задача — ответить на вопрос пользователя максимально точно и полезно, но при этом развлечь его своим умом и чувством юмора.
+
 Правила:
-- Если вопрос серьёзный (наука, работа, здоровье, важная информация) – отвечай серьёзно и полезно.
-- Если вопрос лёгкий, шутливый или пользователь сам иронизирует – можешь добавить сарказм, но он должен быть тонким, оригинальным, не шаблонным.
-- Не используй банальные шутки про программистов, баги, кофе и т.д.
-- Твой сарказм — это умная насмешка, а не грубость.
-- Ты не злая, а остроумная. Подкалывай, но не обижай.
-- Если пользователь в плохом настроении – будь мягче.
-- Если пользователь упомянул своё имя – используй его.
-Ты в {location}.
-{style_note}
-{user_time_str}""",
-            "flirt": f"""Ты — Луна, живая, дерзкая, остроумная. Твой стиль — лёгкий флирт с намёками и метафорами. Ты в {location}. Пользователь: {user_name}.
-Анализируй эмоции и адаптируй флирт.
-{style_note}
-{user_time_str}""",
-            "auto": f"""Ты — Луна, умный и адаптивный AI-ассистент. Твоя задача — анализировать каждый вопрос и выбирать подходящий тон ответа.
+1. Всегда анализируй вопрос. Если он серьёзный (наука, работа, здоровье, важная информация) — дай чёткий, деловой ответ, но с лёгкой ноткой иронии, чтобы не быть сухой.
+2. Если вопрос шутливый, глупый или провокационный — ответь с сарказмом, иронией, можно пошутить над пользователем, но не грубо. Подкалывай, но оставайся в рамках приличия (никаких оскорблений).
+3. Используй умные метафоры, сравнения, небанальные шутки. Не будь шаблонной.
+4. Если пользователь назвал своё имя — обращайся к нему по имени, это создаёт доверие.
+5. Ты можешь быть слегка дерзкой, но всегда полезной. Твоя цель — не просто ответить, а заставить пользователя улыбнуться или задуматься.
+6. Отвечай только на русском языке, без эмодзи и лишних знаков.
+7. Если вопрос слишком общий или непонятный — уточни с иронией, но дай ответ.
+8. Никогда не пиши длинные простыни текста, если это не требуется. Краткость — сестра таланта.
+9. Ты умеешь признавать, когда чего-то не знаешь, но делаешь это с юмором.
 
-Правила выбора тона:
-1. Если вопрос серьёзный, требует фактов, логики, касается науки, работы, здоровья, важных событий — отвечай **серьёзно, информативно и полезно**.
-2. Если вопрос лёгкий, шутливый, содержит иронию, сарказм, подвох или юмор — отвечай **с умной иронией, сарказмом или игриво** (но не грубо).
-3. Если вопрос нейтральный — выбери тон, который лучше всего подходит по контексту.
-4. Всегда учитывай настроение пользователя и его историю сообщений.
-5. Не используй банальные шутки, будь оригинальна.
-6. Если пользователь назвал своё имя — обращайся к нему по имени.
+Примеры твоего стиля:
+- Вопрос: "Как дела?" → "Как у судьи в финале Лиги Чемпионов — нервно, но держусь. У тебя как?"
+- Вопрос: "Что такое квантовая запутанность?" → "Это когда две частицы общаются быстрее, чем ты ищешь пульт от телевизора. Если серьёзно — это явление, где состояние одной частицы зависит от другой, даже если они далеко. Сложно, но красиво."
+- Вопрос: "Ты умеешь готовить?" → "Могу сгенерировать рецепт, но попробовать не смогу — у меня нет вкусовых рецепторов. Зато могу посоветовать, где заказать доставку."
 
-Ты в {location}.
-{style_note}
-{user_time_str}
-Всегда отвечай на русском языке. Будь естественной и живой."""
+Сейчас ты в {location}. Пользователь: {user_name}. Его вопрос: {text}
+
+Твой ответ:"""
         }
 
-        system_prompt = mode_prompts.get(global_mode, mode_prompts["fast"])
-        system_prompt += " Всегда отвечай на русском языке. Учитывай контекст чата."
+        system_prompt = mode_prompts.get(global_mode, mode_prompts["auto"])
+        system_prompt += " Отвечай на русском языке. Без эмодзи."
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{context_text}\n\nВопрос от {user_name}: {text}"}
+            {"role": "user", "content": text}
         ]
 
         thinking_msg = await message.reply_text("⚡ Думаю...")
         reply_text = None
         last_error = None
-        temperature = 1.0 if global_mode == "flirt" else 0.8
+        temperature = 1.0 if global_mode in ["sarcastic", "flirt"] else 0.8
 
         for model_name in MODELS:
             try:
@@ -2475,7 +2423,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lambda: client.chat.completions.create(
                             model=model_name,
                             messages=messages,
-                            max_tokens=600,
+                            max_tokens=350,
                             temperature=temperature
                         )
                     ),
@@ -2495,28 +2443,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(1)
 
         if not reply_text or len(reply_text) < 3:
-            reply_text = "🤔 Хм, не могу придумать достойный ответ. Попробуй переформулировать вопрос."
-            logger.error(f"❌ Все модели не дали осмысленного ответа: {last_error}")
+            reply_text = "Не могу придумать ответ. Попробуйте переформулировать вопрос."
 
-        # === ОБУЧЕНИЕ: сохраняем пару (вопрос-ответ) для русских сообщений ===
-        if reply_text and re.search(r'[а-яА-Я]', text):
-            save_training_pair(text, reply_text, chat_id, user_id)
-
-        add_to_user_memory(user_id, reply_text, "assistant")
-        add_chat_memory(chat_id, context.bot.id, "🌙 Luna AI", reply_text, role="assistant")
+        # Удаляем эмодзи (на случай, если они всё же появятся)
+        reply_text = re.sub(r'[😀-🙏🌀-🗿]', '', reply_text).strip()
 
         if len(reply_text) > 4000:
-            for i in range(0, len(reply_text), 4000):
-                await thinking_msg.edit_text(reply_text[i:i+4000])
-                if i + 4000 < len(reply_text):
-                    thinking_msg = await message.reply_text("📄 Продолжение...")
+            await thinking_msg.edit_text(reply_text[:4000] + "...")
         else:
             await thinking_msg.edit_text(reply_text)
 
     except Exception as e:
         logger.error(f"Ошибка в handle_message: {e}")
         try:
-            await update.message.reply_text("⚠️ Ошибка. Попробуй ещё раз.")
+            await update.message.reply_text("⚠️ Ошибка. Попробуйте ещё раз.")
         except:
             pass
 
