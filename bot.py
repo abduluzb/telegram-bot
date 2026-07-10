@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)
-# Новый умный промпт с адаптивным тоном
+# bot.py - Luna AI с трейлерами (MP4), музыкой, и скачиванием Instagram видео
+# Добавлена поддержка Instagram ссылок через yt-dlp
 
 import os
 import asyncio
@@ -219,6 +219,64 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
             await context.bot.send_message(chat_id=OWNER_USER_ID, text=text)
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
+
+# ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
+def is_instagram_url(text: str) -> bool:
+    """Проверяет, является ли текст ссылкой на Instagram."""
+    patterns = [
+        r'(?:https?:)?\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv)\/[a-zA-Z0-9_-]+',
+        r'(?:https?:)?\/\/(?:www\.)?instagram\.com\/stories\/[a-zA-Z0-9_.]+\/[0-9]+',
+        r'(?:https?:)?\/\/instagr\.am\/(?:p|reel|tv)\/[a-zA-Z0-9_-]+',
+    ]
+    for pattern in patterns:
+        if re.search(pattern, text):
+            return True
+    return False
+
+async def download_instagram_video(url: str) -> Optional[str]:
+    """Скачивает видео с Instagram и возвращает путь к файлу."""
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': 'instagram_%(id)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 60,
+        'socket_timeout': 60,
+    }
+    
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, 'instagram.%(ext)s')
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                download_task = asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: ydl.download([url])
+                )
+                await asyncio.wait_for(download_task, timeout=120)
+                
+                video_file = None
+                for f in os.listdir(tmpdir):
+                    if f.startswith('instagram.'):
+                        video_file = os.path.join(tmpdir, f)
+                        break
+                
+                if not video_file:
+                    return None
+                    
+                return video_file
+    except asyncio.TimeoutError:
+        logger.error("Таймаут при скачивании Instagram видео")
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка скачивания Instagram: {e}")
+        return None
+# ===== КОНЕЦ БЛОКА INSTAGRAM =====
 
 # ===== МОДЕРАЦИЯ =====
 BAD_WORDS = [
@@ -870,9 +928,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         greeting += "Ты можешь сказать «луна запомни моё имя <имя>», чтобы я обращалась к тебе по имени.\n"
     greeting += (
         "Умею анализировать эмоции, давать погоду, напоминать,\n"
-        "генерировать картинки, искать видео на YouTube и искать информацию в Википедии!\n\n"
+        "генерировать картинки, искать видео на YouTube и Instagram, и искать информацию в Википедии!\n\n"
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
-        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n\n"
+        "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n"
+        "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -897,6 +956,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Генерирую изображения через /imagine\n"
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
+        "• Скачиваю видео из Instagram по ссылке\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
@@ -2079,6 +2139,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await apply_moderation(update, context):
             return
 
+        # ===== ПРОВЕРКА НА INSTAGRAM =====
+        if is_instagram_url(text):
+            status_msg = await message.reply_text("📥 Скачиваю видео из Instagram...")
+            video_path = await download_instagram_video(text)
+            
+            if video_path:
+                try:
+                    await context.bot.send_video(
+                        chat_id=update.effective_chat.id,
+                        video=open(video_path, 'rb'),
+                        caption="🎬 Видео из Instagram"
+                    )
+                    await status_msg.delete()
+                except Exception as e:
+                    logger.error(f"Ошибка отправки Instagram видео: {e}")
+                    await status_msg.edit_text(f"❌ Ошибка при отправке видео: {e}")
+                finally:
+                    # Удаляем временный файл
+                    try:
+                        os.remove(video_path)
+                    except:
+                        pass
+            else:
+                await status_msg.edit_text("❌ Не удалось скачать видео. Проверьте ссылку.\n\nВозможные причины:\n- Ссылка ведёт на приватный аккаунт\n- Видео недоступно\n- Ссылка недействительна")
+            return
+
+        # ---- ДАЛЕЕ СТАНДАРТНАЯ ЛОГИКА ----
         user_info = get_or_create_user_info(
             user_id=user_id,
             username=user.username,
@@ -2366,7 +2453,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
 
         # === НОВЫЙ ПРОМПТ ДЛЯ РЕЖИМА "auto" (адаптивный тон) ===
-        # Остальные режимы (fast, smart, sarcastic, flirt) оставлены без изменений
         mode_prompts = {
             "fast": f"""Ты — Luna AI. Отвечай максимально кратко (1-2 предложения) и точно, но с лёгкой иронией. Без воды. Сарказм приветствуется.
 Пользователь: {user_name}. Вопрос: {text}""",
@@ -2632,10 +2718,11 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4) и музыкой (аудио через Spotify+YouTube)!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой и скачиванием Instagram!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
+    logger.info("📥 Instagram: готов к скачиванию")
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
