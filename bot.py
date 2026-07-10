@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и аудио
-# Исправлено: обход капчи YouTube, поиск файлов, кнопка "Скачать аудио"
+# bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
+# Исправлена кнопка "Скачать аудио", добавлен поиск полной версии через Shazam API
 
 import os
 import asyncio
@@ -97,6 +97,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+SHAZAM_API_KEY = os.getenv("SHAZAM_API_KEY")  # Добавьте в .env
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден!")
@@ -341,6 +342,101 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         return None
     except Exception as e:
         logger.error(f"Ошибка скачивания аудио из Instagram: {e}")
+        return None
+
+# ===== РАСПОЗНАВАНИЕ МУЗЫКИ ЧЕРЕЗ SHAZAM API =====
+async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Распознаёт музыку через Shazam API.
+    Возвращает (название_трека, исполнитель) или (None, None).
+    """
+    if not SHAZAM_API_KEY:
+        logger.error("❌ SHAZAM_API_KEY не найден в .env!")
+        return None, None
+
+    base_url = "https://shazam-api.com/api"
+    headers = {
+        "Authorization": f"Bearer {SHAZAM_API_KEY}"
+    }
+
+    try:
+        # 1. Отправляем аудиофайл
+        with open(audio_path, 'rb') as f:
+            files = {'file': f}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{base_url}/recognize", headers=headers, files=files, timeout=30) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Ошибка распознавания (status {resp.status}): {await resp.text()}")
+                        return None, None
+                    data = await resp.json()
+                    uuid_shazam = data.get('uuid')
+                    if not uuid_shazam:
+                        logger.error(f"Не получен UUID: {data}")
+                        return None, None
+                    logger.info(f"Распознавание начато, UUID: {uuid_shazam}")
+
+        # 2. Опрашиваем результаты
+        attempts = 0
+        max_attempts = 20  # 20 * 2 секунды = 40 секунд максимум
+        async with aiohttp.ClientSession() as session:
+            while attempts < max_attempts:
+                await asyncio.sleep(2)
+                attempts += 1
+                try:
+                    async with session.post(f"{base_url}/results/{uuid_shazam}", headers=headers, timeout=10) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        status = data.get('status')
+                        if status == 'completed':
+                            results = data.get('results', [])
+                            if results:
+                                track = results[0].get('track', {})
+                                title = track.get('title')
+                                artist = track.get('subtitle')
+                                if title and artist:
+                                    logger.info(f"🎵 Распознано: {title} - {artist}")
+                                    return title, artist
+                            # Если results пустые, но статус completed — возможно, музыка не найдена
+                            logger.warning("Статус completed, но results пусты")
+                            return None, None
+                        elif status == 'failed':
+                            logger.error(f"Распознавание не удалось: {data}")
+                            return None, None
+                        elif status == 'processing':
+                            continue
+                except Exception as e:
+                    logger.warning(f"Ошибка при опросе (попытка {attempts}): {e}")
+
+        logger.error("Время ожидания результатов истекло")
+        return None, None
+
+    except Exception as e:
+        logger.error(f"Общая ошибка распознавания: {e}")
+        return None, None
+
+async def search_youtube_music(track_name: str, artist: str) -> Optional[str]:
+    """Ищет видео на YouTube по названию трека и исполнителю, возвращает URL первого результата."""
+    if not youtube:
+        return None
+    
+    query = f"{track_name} {artist} official audio"
+    try:
+        request = youtube.search().list(
+            part="snippet",
+            q=query,
+            type="video",
+            maxResults=1,
+            order="relevance"
+        )
+        response = request.execute()
+        items = response.get("items", [])
+        if items:
+            video_id = items[0]["id"]["videoId"]
+            return f"https://www.youtube.com/watch?v={video_id}"
+        return None
+    except Exception as e:
+        logger.error(f"Ошибка поиска на YouTube: {e}")
         return None
 # ===== КОНЕЦ БЛОКА INSTAGRAM =====
 
@@ -998,7 +1094,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
         "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n"
         "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n"
-        "🎵 *Супер!* Под видео из Instagram будет кнопка «Скачать аудио» — нажмите, и я пришлю MP3!\n\n"
+        "🎵 *Супер!* Под видео из Instagram будут кнопки:\n"
+        "   — «Скачать аудио» (из этого Reels)\n"
+        "   — «Найти полную версию» (распознаю через Shazam и скачаю с YouTube)\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -1024,7 +1122,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Скачиваю видео из Instagram по ссылке\n"
-        "• Под видео есть кнопка «Скачать аудио»\n"
+        "• Под видео есть кнопки «Скачать аудио» и «Найти полную версию» (Shazam)\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
@@ -1342,7 +1440,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === КОМАНДА МУЗЫКИ (исправлена) ===
+# === КОМАНДА МУЗЫКИ (НЕ ТРОГАТЬ!) ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not spotify:
         await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
@@ -1418,7 +1516,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание видео и извлечение аудио) ===
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) - НЕ ТРОГАТЬ! ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1493,7 +1591,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
                     await status_msg.edit_text("⏰ Скачивание заняло слишком много времени. Попробуйте позже.")
                     return
 
-                # Ищем любой файл (не папку) размером > 1KB
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1540,6 +1637,193 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("❌ Поиск музыки отменён.")
+
+# ===== ОБРАБОТЧИКИ ДЛЯ INSTAGRAM =====
+async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("ig_audio_"):
+        return
+    
+    audio_id = data.split("_")[2]
+    
+    # Получаем ссылку из user_data
+    requests = context.user_data.get('instagram_audio_requests', {})
+    url = requests.get(audio_id)
+    if not url:
+        await query.message.reply_text("❌ Ссылка устарела. Отправьте видео заново.")
+        await query.delete_message()
+        return
+    
+    # Отправляем новое сообщение о начале скачивания
+    status_msg = await query.message.reply_text("🎵 Скачиваю аудио из Instagram...")
+    
+    audio_path = await download_instagram_audio(url)
+    
+    if audio_path:
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                await context.bot.send_audio(
+                    chat_id=query.message.chat_id,
+                    audio=audio_file,
+                    title="Instagram Reel Audio",
+                    performer="Instagram"
+                )
+            await status_msg.delete()
+            await query.delete_message()
+        except Exception as e:
+            logger.error(f"Ошибка отправки аудио: {e}")
+            await status_msg.edit_text(f"❌ Ошибка при отправке аудио: {e}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                except:
+                    pass
+    else:
+        await status_msg.edit_text(
+            "❌ Не удалось скачать аудио.\n\n"
+            "Возможные причины:\n"
+            "- Видео недоступно\n"
+            "- Не установлен ffmpeg (нужен для извлечения аудио)\n"
+            "- Ссылка ведёт на приватный аккаунт\n"
+            "Установите ffmpeg: apt-get install ffmpeg"
+        )
+
+async def instagram_find_full_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Находит и скачивает полную версию музыки из Instagram Reels через Shazam."""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if not data.startswith("ig_find_full_"):
+        return
+    
+    audio_id = data.split("_")[3]
+    
+    # Получаем ссылку из user_data
+    requests = context.user_data.get('instagram_audio_requests', {})
+    url = requests.get(audio_id)
+    if not url:
+        await query.message.reply_text("❌ Ссылка устарела. Отправьте видео заново.")
+        await query.delete_message()
+        return
+    
+    status_msg = await query.message.reply_text("🔍 Скачиваю аудио для распознавания...")
+    
+    # 1. Скачиваем аудио из Reels
+    audio_path = await download_instagram_audio(url)
+    if not audio_path:
+        await status_msg.edit_text("❌ Не удалось скачать аудио из видео.")
+        return
+    
+    # 2. Распознаём музыку через Shazam
+    await status_msg.edit_text("🎵 Распознаю музыку через Shazam...")
+    track_name, artist = await recognize_music_shazam(audio_path)
+    
+    # Удаляем временный аудиофайл
+    if audio_path and os.path.exists(audio_path):
+        try:
+            os.remove(audio_path)
+        except:
+            pass
+    
+    if not track_name or not artist:
+        await status_msg.edit_text(
+            "❌ Не удалось распознать музыку.\n\n"
+            "Возможные причины:\n"
+            "- Аудио слишком короткое или низкое качество\n"
+            "- Музыка редкая или не в базе Shazam\n"
+            "- Достигнут лимит запросов"
+        )
+        return
+    
+    # 3. Ищем на YouTube
+    await status_msg.edit_text(f"🎶 Найдено: {track_name} - {artist}\n🔍 Ищу полную версию на YouTube...")
+    video_url = await search_youtube_music(track_name, artist)
+    
+    if not video_url:
+        await status_msg.edit_text(
+            f"🎶 Найдено: {track_name} - {artist}\n\n"
+            "❌ Не удалось найти полную версию на YouTube.\n"
+            "Попробуйте поискать вручную."
+        )
+        return
+    
+    # 4. Скачиваем полную версию
+    await status_msg.edit_text(f"⬇️ Скачиваю: {track_name} - {artist}...")
+    
+    # Используем ту же функцию, что и для /music, но с одним видео
+    ffmpeg_available = shutil.which('ffmpeg') is not None
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }] if ffmpeg_available else [],
+        'outtmpl': '%(title)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'extractor_args': {
+            'youtube': {
+                'skip': ['webpage', 'dash', 'hls'],
+                'player_client': ['android', 'web'],
+            }
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 120,
+        'socket_timeout': 120,
+    }
+    
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                download_task = asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: ydl.download([video_url])
+                )
+                await asyncio.wait_for(download_task, timeout=120)
+                
+                # Ищем скачанный аудиофайл
+                audio_file = None
+                for f in os.listdir(tmpdir):
+                    full_path = os.path.join(tmpdir, f)
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                        audio_file = full_path
+                        break
+                
+                if not audio_file:
+                    await status_msg.edit_text("❌ Не удалось найти скачанный файл.")
+                    return
+                
+                await status_msg.edit_text("📤 Отправляю полную версию...")
+                with open(audio_file, 'rb') as f:
+                    await context.bot.send_audio(
+                        chat_id=query.message.chat_id,
+                        audio=f,
+                        title=track_name,
+                        performer=artist,
+                    )
+                await status_msg.delete()
+                await query.delete_message()
+                
+    except Exception as e:
+        logger.error(f"Ошибка скачивания полной версии: {e}")
+        await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}")
+    
+    # Очищаем запрос
+    if audio_id in context.user_data.get('instagram_audio_requests', {}):
+        del context.user_data['instagram_audio_requests'][audio_id]
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def setcity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2215,20 +2499,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if video_path:
                 try:
-                    # Создаём уникальный ID для этой ссылки
+                    # Генерируем уникальный ID для ссылки
                     audio_id = uuid.uuid4().hex
-                    # Сохраняем ссылку для последующего скачивания аудио
                     if 'instagram_audio_requests' not in context.user_data:
                         context.user_data['instagram_audio_requests'] = {}
                     context.user_data['instagram_audio_requests'][audio_id] = text
+                    
+                    # Кнопки: скачать аудио ИЛИ найти полную версию
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎵 Скачать аудио (из Reels)", callback_data=f"ig_audio_{audio_id}")],
+                        [InlineKeyboardButton("🎶 Найти полную версию", callback_data=f"ig_find_full_{audio_id}")]
+                    ])
                     
                     await context.bot.send_video(
                         chat_id=update.effective_chat.id,
                         video=open(video_path, 'rb'),
                         caption="🎬 Видео из Instagram",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🎵 Скачать аудио", callback_data=f"ig_audio_{audio_id}")]
-                        ])
+                        reply_markup=keyboard
                     )
                     await status_msg.delete()
                 except Exception as e:
@@ -2644,57 +2931,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ===== ОБРАБОТЧИК КНОПКИ "СКАЧАТЬ АУДИО" ИЗ INSTAGRAM =====
-async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    if not data.startswith("ig_audio_"):
-        return
-    
-    audio_id = data.split("_")[2]
-    
-    # Получаем ссылку из user_data
-    requests = context.user_data.get('instagram_audio_requests', {})
-    url = requests.get(audio_id)
-    if not url:
-        await query.edit_message_text("❌ Ссылка устарела. Отправьте видео заново.")
-        return
-    
-    await query.edit_message_text("🎵 Скачиваю аудио из Instagram...")
-    audio_path = await download_instagram_audio(url)
-    
-    if audio_path:
-        try:
-            with open(audio_path, 'rb') as audio_file:
-                await context.bot.send_audio(
-                    chat_id=query.message.chat_id,
-                    audio=audio_file,
-                    title="Instagram Reel Audio",
-                    performer="Instagram"
-                )
-            await query.delete_message()
-        except Exception as e:
-            logger.error(f"Ошибка отправки аудио: {e}")
-            await query.edit_message_text(f"❌ Ошибка при отправке аудио: {e}")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except:
-                    pass
-    else:
-        await query.edit_message_text(
-            "❌ Не удалось скачать аудио.\n\n"
-            "Возможные причины:\n"
-            "- Видео недоступно\n"
-            "- Не установлен ffmpeg (нужен для извлечения аудио)\n"
-            "- Ссылка ведёт на приватный аккаунт\n"
-            "Установите ffmpeg: apt-get install ffmpeg"
-        )
-
 # ===== ЗАЯВКИ НА ВСТУПЛЕНИЕ =====
 async def join_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     join_request = update.chat_join_request
@@ -2777,6 +3013,7 @@ def main():
     application.add_handler(CallbackQueryHandler(music_yt_select_callback, pattern="^music_yt_select_"))
     application.add_handler(CallbackQueryHandler(music_cancel_callback, pattern="^music_cancel$"))
     application.add_handler(CallbackQueryHandler(instagram_audio_callback, pattern="^ig_audio_"))
+    application.add_handler(CallbackQueryHandler(instagram_find_full_callback, pattern="^ig_find_full_"))
 
     # === Общий callback-обработчик ===
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -2849,12 +3086,12 @@ def main():
 
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой, Instagram видео и аудио!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой, Instagram видео и Shazam!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
-    logger.info("📥 Instagram: готов к скачиванию видео и аудио")
-    logger.info("🎵 Кнопка 'Скачать аудио' добавлена под видео из Instagram")
+    logger.info("📥 Instagram: видео + кнопки аудио и полной версии через Shazam")
+    logger.info("🎵 Shazam API: " + ("подключен" if SHAZAM_API_KEY else "НЕ НАСТРОЕН!"))
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
