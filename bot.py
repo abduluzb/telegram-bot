@@ -362,15 +362,11 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
     try:
         # 1. Отправляем аудиофайл
         with open(audio_path, 'rb') as f:
-            # Правильный способ отправки файла через aiohttp
-            form_data = aiohttp.FormData()
-            form_data.add_field('file', f, filename='audio.mp3', content_type='audio/mpeg')
-            
+            files = {'file': f}
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{base_url}/recognize", headers=headers, data=form_data, timeout=30) as resp:
+                async with session.post(f"{base_url}/recognize", headers=headers, files=files, timeout=30) as resp:
                     if resp.status != 200:
-                        error_text = await resp.text()
-                        logger.error(f"Ошибка распознавания (status {resp.status}): {error_text}")
+                        logger.error(f"Ошибка распознавания (status {resp.status}): {await resp.text()}")
                         return None, None
                     data = await resp.json()
                     uuid_shazam = data.get('uuid')
