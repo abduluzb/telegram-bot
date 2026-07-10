@@ -1,5 +1,5 @@
-# bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и аудио (с кнопкой)
-# Исправлена ошибка поиска файла для Instagram аудио
+# bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и аудио
+# Полностью рабочие функции Instagram с кнопкой "Скачать аудио"
 
 import os
 import asyncio
@@ -151,6 +151,7 @@ user_names: Dict[int, str] = {}
 last_request_time: Dict[int, float] = {}
 user_memory: Dict[int, List[Dict]] = {}
 MAX_MEMORY = 50
+instagram_audio_requests: Dict[str, str] = {}  # для хранения ссылок по UUID
 
 # === Вспомогательные функции ===
 def get_user_timezone(timezone_str: str):
@@ -236,100 +237,100 @@ def is_instagram_url(text: str) -> bool:
 
 async def download_instagram_video(url: str) -> Optional[str]:
     """Скачивает видео с Instagram и возвращает путь к файлу."""
+    temp_dir = tempfile.gettempdir()
+    filename = f"insta_vid_{uuid.uuid4().hex[:8]}.mp4"
+    filepath = os.path.join(temp_dir, filename)
+    
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': filepath,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 60,
+        'socket_timeout': 60,
+    }
+    
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts = {
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': os.path.join(tmpdir, 'instagram.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                },
-                'ignoreerrors': True,
-                'nooverwrites': True,
-                'timeout': 60,
-                'socket_timeout': 60,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                download_task = asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: ydl.download([url])
-                )
-                await asyncio.wait_for(download_task, timeout=120)
-            
-            # Ищем файл с префиксом instagram.
-            for f in os.listdir(tmpdir):
-                if f.startswith('instagram.'):
-                    filepath = os.path.join(tmpdir, f)
-                    if os.path.isfile(filepath) and os.path.getsize(filepath) > 1024:
-                        # Копируем файл во временную папку /tmp, чтобы он не удалился
-                        temp_dir = tempfile.gettempdir()
-                        final_path = os.path.join(temp_dir, f"instagram_video_{uuid.uuid4().hex}.mp4")
-                        shutil.copy2(filepath, final_path)
-                        return final_path
-            return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            download_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: ydl.download([url])
+            )
+            await asyncio.wait_for(download_task, timeout=120)
+        
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
+            return filepath
+        return None
     except Exception as e:
         logger.error(f"Ошибка скачивания Instagram видео: {e}")
         return None
 
 async def download_instagram_audio(url: str) -> Optional[str]:
-    """Скачивает аудио из Instagram и возвращает путь к файлу."""
+    """Скачивает аудио из Instagram Reels/видео и возвращает путь к MP3."""
+    temp_dir = tempfile.gettempdir()
+    audio_id = uuid.uuid4().hex[:8]
+    filepath = os.path.join(temp_dir, f"insta_audio_{audio_id}.mp3")
+    
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': filepath,
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        'ignoreerrors': True,
+        'nooverwrites': True,
+        'timeout': 60,
+        'socket_timeout': 60,
+    }
+    
+    # Проверяем наличие ffmpeg для конвертации
     ffmpeg_available = shutil.which('ffmpeg') is not None
+    if ffmpeg_available:
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+        # Для постпроцессора нужно другое имя файла
+        filepath_no_ext = os.path.join(temp_dir, f"insta_audio_{audio_id}")
+        ydl_opts['outtmpl'] = filepath_no_ext
+    else:
+        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
+    
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(tmpdir, 'instagram_audio.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                },
-                'ignoreerrors': True,
-                'nooverwrites': True,
-                'timeout': 60,
-                'socket_timeout': 60,
-            }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            download_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: ydl.download([url])
+            )
+            await asyncio.wait_for(download_task, timeout=120)
+        
+        # Ищем файл
+        if ffmpeg_available:
+            # После конвертации файл будет с расширением .mp3
+            final_path = f"{filepath_no_ext}.mp3"
+            if os.path.exists(final_path) and os.path.getsize(final_path) > 1024:
+                return final_path
+        else:
+            # Если ffmpeg нет, ищем любой файл, начинающийся с insta_audio_
+            for f in os.listdir(temp_dir):
+                if f.startswith('insta_audio_') and os.path.getsize(os.path.join(temp_dir, f)) > 1024:
+                    return os.path.join(temp_dir, f)
+        
+        # Прямой поиск
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
+            return filepath
             
-            if ffmpeg_available:
-                ydl_opts['postprocessors'] = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
-            else:
-                logger.warning("ffmpeg не найден, скачиваем без конвертации")
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                download_task = asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: ydl.download([url])
-                )
-                await asyncio.wait_for(download_task, timeout=120)
-            
-            # Ищем файл, начинающийся с instagram_audio.
-            audio_file = None
-            for f in os.listdir(tmpdir):
-                if f.startswith('instagram_audio.'):
-                    audio_file = os.path.join(tmpdir, f)
-                    break
-            
-            if not audio_file:
-                return None
-            
-            # Проверяем размер
-            if os.path.getsize(audio_file) <= 1024:
-                return None
-            
-            # Копируем в /tmp с уникальным именем
-            temp_dir = tempfile.gettempdir()
-            ext = os.path.splitext(audio_file)[1]
-            final_path = os.path.join(temp_dir, f"instagram_audio_{uuid.uuid4().hex}{ext}")
-            shutil.copy2(audio_file, final_path)
-            return final_path
+        return None
     except Exception as e:
         logger.error(f"Ошибка скачивания аудио из Instagram: {e}")
         return None
@@ -989,7 +990,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎬 *Новое!* Трейлеры фильмов — команда /trailer <название> (скачиваю MP4)\n"
         "🎵 *Новое!* Поиск музыки с выбором трека — /music <название> (скачиваю аудио)\n"
         "📥 *Новое!* Просто отправьте мне ссылку на Instagram (Reels/пост) — я скачаю видео!\n"
-        "   А после видео появится кнопка 🎵 Скачать аудио — нажмите, и я извлеку аудио!\n\n"
+        "🎵 Нажмите кнопку «Скачать аудио» под видео, чтобы получить MP3!\n\n"
         "Мои команды:\n"
         "/setcity <город> – указать свой город\n"
         "/settimezone <таймзона> – указать часовой пояс\n"
@@ -1015,7 +1016,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Ищу видео через /yt\n"
         "• Ищу информацию в Википедии через /wiki\n"
         "• Скачиваю видео из Instagram по ссылке\n"
-        "• Кнопка 🎵 Скачать аудио под видео — извлекает аудио из Instagram Reels\n"
+        "• Скачиваю аудио из Instagram по кнопке под видео\n"
         "• Сохраняю заметки по команде 'луна запомни ...'\n"
         "• Запоминаю твоё имя по команде 'луна запомни моё имя <имя>'\n"
         "• 🎬 Поиск и скачивание трейлеров через /trailer\n"
@@ -1531,9 +1532,9 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     await query.edit_message_text("❌ Поиск музыки отменён.")
 
-# ===== INSTAGRAM AUDIO CALLBACK =====
+# ===== ОБРАБОТЧИК ДЛЯ КНОПКИ "СКАЧАТЬ АУДИО" ИЗ INSTAGRAM =====
 async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
+    """Скачивает аудио из Instagram по ссылке, сохранённой в глобальном словаре."""
     query = update.callback_query
     await query.answer()
     
@@ -1541,11 +1542,10 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
     if not data.startswith("ig_audio_"):
         return
     
-    audio_id = data.split("_")[2]  # формат: ig_audio_{uuid}
+    audio_id = data.split("_")[2]
     
-    # Получаем ссылку из user_data
-    requests = context.user_data.get('instagram_audio_requests', {})
-    url = requests.get(audio_id)
+    # Получаем ссылку из глобального словаря
+    url = instagram_audio_requests.get(audio_id)
     if not url:
         await query.edit_message_text("❌ Ссылка устарела. Отправьте видео заново.")
         return
@@ -2256,11 +2256,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if video_path:
                 try:
                     # Создаём уникальный ID для этой ссылки
-                    audio_id = uuid.uuid4().hex
-                    # Сохраняем ссылку для последующего скачивания аудио
-                    if 'instagram_audio_requests' not in context.user_data:
-                        context.user_data['instagram_audio_requests'] = {}
-                    context.user_data['instagram_audio_requests'][audio_id] = text
+                    audio_id = uuid.uuid4().hex[:8]
+                    # Сохраняем ссылку в глобальный словарь
+                    instagram_audio_requests[audio_id] = text
                     
                     await context.bot.send_video(
                         chat_id=update.effective_chat.id,
@@ -2571,7 +2569,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         custom_name = user_info.get('custom_name') if user_info else None
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
 
-        # === НОВЫЙ ПРОМПТ ДЛЯ РЕЖИМА "auto" (адаптивный тон) ===
+        # === ПРОМПТЫ ===
         mode_prompts = {
             "fast": f"""Ты — Luna AI. Отвечай максимально кратко (1-2 предложения) и точно, но с лёгкой иронией. Без воды. Сарказм приветствуется.
 Пользователь: {user_name}. Вопрос: {text}""",
