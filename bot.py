@@ -2660,10 +2660,13 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
     requests = context.user_data.get('instagram_audio_requests', {})
     url = requests.get(audio_id)
     if not url:
-        await query.edit_message_text("❌ Ссылка устарела. Отправьте видео заново.")
+        await query.message.reply_text("❌ Ссылка устарела. Отправьте видео заново.")
+        await query.delete_message()
         return
     
-    await query.edit_message_text("🎵 Скачиваю аудио из Instagram...")
+    # Отправляем новое сообщение о начале скачивания
+    status_msg = await query.message.reply_text("🎵 Скачиваю аудио из Instagram...")
+    
     audio_path = await download_instagram_audio(url)
     
     if audio_path:
@@ -2675,10 +2678,11 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
                     title="Instagram Reel Audio",
                     performer="Instagram"
                 )
-            await query.delete_message()
+            await status_msg.delete()
+            await query.delete_message()  # удаляем видео с кнопкой после успешной отправки
         except Exception as e:
             logger.error(f"Ошибка отправки аудио: {e}")
-            await query.edit_message_text(f"❌ Ошибка при отправке аудио: {e}")
+            await status_msg.edit_text(f"❌ Ошибка при отправке аудио: {e}")
         finally:
             if audio_path and os.path.exists(audio_path):
                 try:
@@ -2686,7 +2690,7 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
                 except:
                     pass
     else:
-        await query.edit_message_text(
+        await status_msg.edit_text(
             "❌ Не удалось скачать аудио.\n\n"
             "Возможные причины:\n"
             "- Видео недоступно\n"
