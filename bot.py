@@ -1677,7 +1677,8 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
                     performer="Instagram"
                 )
             await status_msg.delete()
-            await query.delete_message()
+            # Убираем кнопки, НО НЕ УДАЛЯЕМ ВИДЕО
+            await query.edit_message_reply_markup(reply_markup=None)
         except Exception as e:
             logger.error(f"Ошибка отправки аудио: {e}")
             await status_msg.edit_text(f"❌ Ошибка при отправке аудио: {e}")
@@ -1819,7 +1820,8 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
                         performer=artist,
                     )
                 await status_msg.delete()
-                await query.delete_message()
+                # Убираем кнопки, НО НЕ УДАЛЯЕМ ВИДЕО
+                await query.edit_message_reply_markup(reply_markup=None)
                 
     except Exception as e:
         logger.error(f"Ошибка скачивания полной версии: {e}")
