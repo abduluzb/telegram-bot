@@ -1,5 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, и скачиванием Instagram видео
-# Исправлена ошибка поиска файла Instagram
+# Исправлена ошибка: файл сохраняется в постоянную папку /tmp/
 
 import os
 import asyncio
@@ -11,6 +11,7 @@ import io
 import requests
 import base64
 import tempfile
+import uuid
 import yt_dlp
 import shutil
 from typing import Dict, List, Set, Tuple, Optional
@@ -234,10 +235,14 @@ def is_instagram_url(text: str) -> bool:
     return False
 
 async def download_instagram_video(url: str) -> Optional[str]:
-    """Скачивает видео с Instagram и возвращает путь к файлу."""
+    """Скачивает видео с Instagram и возвращает путь к файлу в /tmp/."""
+    temp_dir = tempfile.gettempdir()
+    filename = f"instagram_{uuid.uuid4().hex}.mp4"
+    filepath = os.path.join(temp_dir, filename)
+    
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
-        'outtmpl': '%(title)s.%(ext)s',
+        'outtmpl': filepath,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -251,42 +256,24 @@ async def download_instagram_video(url: str) -> Optional[str]:
     }
     
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                download_task = asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: ydl.download([url])
-                )
-                await asyncio.wait_for(download_task, timeout=120)
-                
-                # Ищем любой видеофайл в tmpdir
-                video_file = None
-                video_extensions = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'mpg', 'mpeg']
-                for f in os.listdir(tmpdir):
-                    full_path = os.path.join(tmpdir, f)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            download_task = asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: ydl.download([url])
+            )
+            await asyncio.wait_for(download_task, timeout=120)
+        
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
+            return filepath
+        else:
+            # Пробуем найти любой файл с тем же префиксом
+            base = os.path.splitext(filepath)[0]
+            for f in os.listdir(temp_dir):
+                if f.startswith(os.path.basename(base)):
+                    full_path = os.path.join(temp_dir, f)
                     if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
-                        ext = f.split('.')[-1].lower() if '.' in f else ''
-                        if ext in video_extensions:
-                            video_file = full_path
-                            break
-                
-                # Если не нашли по расширению, берём первый попавшийся файл (кроме .part)
-                if not video_file:
-                    for f in os.listdir(tmpdir):
-                        full_path = os.path.join(tmpdir, f)
-                        if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024 and not f.endswith('.part'):
-                            video_file = full_path
-                            break
-                
-                if not video_file:
-                    logger.error(f"Не найден файл в tmpdir: {os.listdir(tmpdir)}")
-                    return None
-                    
-                return video_file
-    except asyncio.TimeoutError:
-        logger.error("Таймаут при скачивании Instagram видео")
-        return None
+                        return full_path
+            return None
     except Exception as e:
         logger.error(f"Ошибка скачивания Instagram: {e}")
         return None
@@ -2160,20 +2147,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if video_path:
                 try:
-                    await context.bot.send_video(
-                        chat_id=update.effective_chat.id,
-                        video=open(video_path, 'rb'),
-                        caption="🎬 Видео из Instagram"
-                    )
+                    with open(video_path, 'rb') as video_file:
+                        await context.bot.send_video(
+                            chat_id=update.effective_chat.id,
+                            video=video_file,
+                            caption="🎬 Видео из Instagram"
+                        )
                     await status_msg.delete()
                 except Exception as e:
                     logger.error(f"Ошибка отправки Instagram видео: {e}")
                     await status_msg.edit_text(f"❌ Ошибка при отправке видео: {e}")
                 finally:
-                    try:
-                        os.remove(video_path)
-                    except:
-                        pass
+                    # Удаляем файл после отправки (даже если ошибка)
+                    if video_path and os.path.exists(video_path):
+                        try:
+                            os.remove(video_path)
+                        except:
+                            pass
             else:
                 await status_msg.edit_text("❌ Не удалось скачать видео. Проверьте ссылку.\n\nВозможные причины:\n- Ссылка ведёт на приватный аккаунт\n- Видео недоступно\n- Ссылка недействительна")
             return
