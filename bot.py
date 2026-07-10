@@ -221,6 +221,7 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
 # ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
+# ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
 def is_instagram_url(text: str) -> bool:
     """Проверяет, является ли текст ссылкой на Instagram."""
     patterns = [
@@ -237,7 +238,7 @@ async def download_instagram_video(url: str) -> Optional[str]:
     """Скачивает видео с Instagram и возвращает путь к файлу."""
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
-        'outtmpl': 'instagram_%(id)s.%(ext)s',
+        'outtmpl': '%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -252,7 +253,7 @@ async def download_instagram_video(url: str) -> Optional[str]:
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts['outtmpl'] = os.path.join(tmpdir, 'instagram.%(ext)s')
+            ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 download_task = asyncio.get_event_loop().run_in_executor(
                     None,
@@ -260,10 +261,12 @@ async def download_instagram_video(url: str) -> Optional[str]:
                 )
                 await asyncio.wait_for(download_task, timeout=120)
                 
+                # Ищем любой файл в tmpdir (не папку) размером > 1KB
                 video_file = None
                 for f in os.listdir(tmpdir):
-                    if f.startswith('instagram.'):
-                        video_file = os.path.join(tmpdir, f)
+                    full_path = os.path.join(tmpdir, f)
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                        video_file = full_path
                         break
                 
                 if not video_file:
