@@ -222,6 +222,20 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
+# ===== FIXED: функция для поиска ffmpeg =====
+def get_ffmpeg_path() -> Optional[str]:
+    """Возвращает путь к ffmpeg или None, если не найден."""
+    # Сначала через shutil.which
+    path = shutil.which('ffmpeg')
+    if path:
+        return path
+    # Проверяем стандартные пути
+    standard_paths = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
+    for p in standard_paths:
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
 # ===== ФУНКЦИИ ДЛЯ INSTAGRAM =====
 def is_instagram_url(text: str) -> bool:
     """Проверяет, является ли текст ссылкой на Instagram."""
@@ -286,14 +300,20 @@ async def download_instagram_video(url: str) -> Optional[str]:
 
 async def download_instagram_audio(url: str) -> Optional[str]:
     """Скачивает аудио из Instagram Reels/видео и возвращает путь к MP3."""
-    ffmpeg_available = shutil.which('ffmpeg') is not None
+    # FIXED: используем get_ffmpeg_path()
+    ffmpeg_path = get_ffmpeg_path()
+    ffmpeg_available = ffmpeg_path is not None
+
     if not ffmpeg_available:
         logger.warning("ffmpeg не найден, попробуем скачать аудио без конвертации")
+    else:
+        logger.info(f"ffmpeg найден по пути: {ffmpeg_path}")
 
     temp_dir = tempfile.gettempdir()
-    filename = f"instagram_audio_{uuid.uuid4().hex}.mp3"
-    filepath = os.path.join(temp_dir, filename)
-    
+    # FIXED: создаём временный файл, но yt-dlp сам создаст с другим именем, поэтому filepath не используется
+    # оставим для совместимости с поиском
+    out_template = os.path.join(temp_dir, 'instagram_audio_%(id)s')
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -301,7 +321,7 @@ async def download_instagram_audio(url: str) -> Optional[str]:
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }] if ffmpeg_available else [],
-        'outtmpl': os.path.join(temp_dir, 'instagram_audio_%(id)s'),
+        'outtmpl': out_template,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
@@ -319,7 +339,11 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         'timeout': 120,
         'socket_timeout': 120,
     }
-    
+
+    # FIXED: передаём путь к ffmpeg, если найден
+    if ffmpeg_available:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             download_task = asyncio.get_event_loop().run_in_executor(
@@ -1551,8 +1575,13 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
-    ffmpeg_available = shutil.which('ffmpeg') is not None
-    if not ffmpeg_available:
+    # FIXED: используем get_ffmpeg_path()
+    ffmpeg_path = get_ffmpeg_path()
+    ffmpeg_available = ffmpeg_path is not None
+
+    if ffmpeg_available:
+        logger.info(f"ffmpeg найден по пути: {ffmpeg_path}")
+    else:
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
@@ -1580,6 +1609,10 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         'timeout': 120,
         'socket_timeout': 120,
     }
+
+    # FIXED: передаём путь к ffmpeg, если найден
+    if ffmpeg_available:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1760,8 +1793,15 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
     # 4. Скачиваем полную версию
     await status_msg.edit_text(f"⬇️ Скачиваю: {track_name} - {artist}...")
     
-    # Используем ту же функцию, что и для /music, но с одним видео
-    ffmpeg_available = shutil.which('ffmpeg') is not None
+    # FIXED: используем get_ffmpeg_path()
+    ffmpeg_path = get_ffmpeg_path()
+    ffmpeg_available = ffmpeg_path is not None
+
+    if ffmpeg_available:
+        logger.info(f"ffmpeg найден по пути: {ffmpeg_path}")
+    else:
+        logger.warning("ffmpeg не найден, извлечение аудио может не работать")
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -1787,6 +1827,9 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         'timeout': 120,
         'socket_timeout': 120,
     }
+
+    if ffmpeg_available:
+        ydl_opts['ffmpeg_location'] = ffmpeg_path
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
