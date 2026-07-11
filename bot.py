@@ -876,13 +876,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=cid,
                         photo=photo,
                         caption=text if text else None,
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 else:
                     await context.bot.send_message(
                         chat_id=cid,
                         text=text,
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 success += 1
             except Exception as e:
@@ -897,13 +897,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=OWNER_USER_ID,
                         photo=photo,
                         caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 else:
                     await context.bot.send_message(
                         chat_id=OWNER_USER_ID,
                         text=f"📢 Копия рассылки:\n\n{text}",
-                        parse_mode='Markdown'
+                        parse_mode=None
                     )
                 success += 1
             except:
