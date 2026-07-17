@@ -1,6 +1,7 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
 # Исправлена кнопка "Скачать аудио", добавлен поиск полной версии через Shazam API
 # Добавлено управление группами в главном меню (отдельная кнопка) и команда /groups
+# Исправлено отображение владельца в уведомлениях, улучшен список групп
 
 import os
 import asyncio
@@ -106,6 +107,7 @@ if not CEREBRAS_API_KEY:
     raise ValueError("❌ CEREBRAS_API_KEY не найден!")
 
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID")) if os.getenv("OWNER_USER_ID") else None
+OWNER_USERNAME = os.getenv("OWNER_USERNAME")  # можно задать в .env, иначе заполнится автоматически
 AUTO_MODERATION_ENABLED = True
 
 pending_requests = {}
@@ -304,7 +306,6 @@ async def download_instagram_video(url: str) -> Optional[str]:
 
 async def download_instagram_audio(url: str) -> Optional[str]:
     """Скачивает аудио из Instagram Reels/видео и возвращает путь к MP3."""
-    # FIXED: используем get_ffmpeg_path()
     ffmpeg_path = get_ffmpeg_path()
     ffmpeg_available = ffmpeg_path is not None
 
@@ -314,8 +315,6 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         logger.info(f"ffmpeg найден по пути: {ffmpeg_path}")
 
     temp_dir = tempfile.gettempdir()
-    # FIXED: создаём временный файл, но yt-dlp сам создаст с другим именем, поэтому filepath не используется
-    # оставим для совместимости с поиском
     out_template = os.path.join(temp_dir, 'instagram_audio_%(id)s')
 
     ydl_opts = {
@@ -344,7 +343,6 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         'socket_timeout': 120,
     }
 
-    # FIXED: передаём путь к ffmpeg, если найден
     if ffmpeg_available:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
 
@@ -356,14 +354,11 @@ async def download_instagram_audio(url: str) -> Optional[str]:
             )
             await asyncio.wait_for(download_task, timeout=120)
         
-        # Ищем файл с расширением .mp3 или .m4a
         for f in os.listdir(temp_dir):
             if f.startswith('instagram_audio_'):
                 full_path = os.path.join(temp_dir, f)
                 if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
-                    # Если это не mp3, но ffmpeg нет, переименовываем в .mp3
                     if not f.endswith('.mp3') and not ffmpeg_available:
-                        # Просто берём как есть
                         return full_path
                     if f.endswith('.mp3'):
                         return full_path
@@ -374,10 +369,6 @@ async def download_instagram_audio(url: str) -> Optional[str]:
 
 # ===== РАСПОЗНАВАНИЕ МУЗЫКИ ЧЕРЕЗ SHAZAM API =====
 async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Распознаёт музыку через Shazam API.
-    Возвращает (название_трека, исполнитель) или (None, None).
-    """
     if not SHAZAM_API_KEY:
         logger.error("❌ SHAZAM_API_KEY не найден в .env!")
         return None, None
@@ -388,9 +379,7 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
     }
 
     try:
-        # 1. Отправляем аудиофайл
         with open(audio_path, 'rb') as f:
-            # Правильный способ отправки файла через aiohttp
             form_data = aiohttp.FormData()
             form_data.add_field('file', f, filename='audio.mp3', content_type='audio/mpeg')
             
@@ -407,9 +396,8 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
                         return None, None
                     logger.info(f"Распознавание начато, UUID: {uuid_shazam}")
 
-        # 2. Опрашиваем результаты
         attempts = 0
-        max_attempts = 20  # 20 * 2 секунды = 40 секунд максимум
+        max_attempts = 20
         async with aiohttp.ClientSession() as session:
             while attempts < max_attempts:
                 await asyncio.sleep(2)
@@ -429,7 +417,6 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
                                 if title and artist:
                                     logger.info(f"🎵 Распознано: {title} - {artist}")
                                     return title, artist
-                            # Если results пустые, но статус completed — возможно, музыка не найдена
                             logger.warning("Статус completed, но results пусты")
                             return None, None
                         elif status == 'failed':
@@ -448,7 +435,6 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
         return None, None
 
 async def search_youtube_music(track_name: str, artist: str) -> Optional[str]:
-    """Ищет видео на YouTube по названию трека и исполнителю, возвращает URL первого результата."""
     if not youtube:
         return None
     
@@ -945,12 +931,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Если не ждём текст, передаём управление основному обработчику
     if context.user_data.get('admin_waiting') != 'text':
         await handle_message(update, context)
         return
 
-    # Если ждём текст, проверяем, что это владелец
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
@@ -993,11 +977,9 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 async def handle_admin_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # Если не ждём фото, просто игнорируем (фото не обрабатываются основной логикой)
     if context.user_data.get('admin_waiting') != 'photo':
         return
 
-    # Если ждём фото, проверяем владельца
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Доступ запрещён.")
         return
@@ -1579,7 +1561,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
 
     status_msg = await query.edit_message_text(f"⬇️ Скачиваю аудио: {title}...")
 
-    # FIXED: используем get_ffmpeg_path()
     ffmpeg_path = get_ffmpeg_path()
     ffmpeg_available = ffmpeg_path is not None
 
@@ -1614,7 +1595,6 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         'socket_timeout': 120,
     }
 
-    # FIXED: передаём путь к ffmpeg, если найден
     if ffmpeg_available:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
 
@@ -1681,7 +1661,6 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===== ОБРАБОТЧИКИ ДЛЯ INSTAGRAM =====
 async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
     query = update.callback_query
     await query.answer()
     
@@ -1691,7 +1670,6 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
     
     audio_id = data.split("_")[2]
     
-    # Получаем ссылку из user_data
     requests = context.user_data.get('instagram_audio_requests', {})
     url = requests.get(audio_id)
     if not url:
@@ -1699,7 +1677,6 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
         await query.delete_message()
         return
     
-    # Отправляем новое сообщение о начале скачивания
     status_msg = await query.message.reply_text("🎵 Скачиваю аудио из Instagram...")
     
     audio_path = await download_instagram_audio(url)
@@ -1735,7 +1712,6 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
 async def instagram_find_full_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Находит и скачивает полную версию музыки из Instagram Reels через Shazam."""
     query = update.callback_query
     await query.answer()
     
@@ -1745,7 +1721,6 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
     
     audio_id = data.split("_")[3]
     
-    # Получаем ссылку из user_data
     requests = context.user_data.get('instagram_audio_requests', {})
     url = requests.get(audio_id)
     if not url:
@@ -1755,17 +1730,14 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
     
     status_msg = await query.message.reply_text("🔍 Скачиваю аудио для распознавания...")
     
-    # 1. Скачиваем аудио из Reels
     audio_path = await download_instagram_audio(url)
     if not audio_path:
         await status_msg.edit_text("❌ Не удалось скачать аудио из видео.")
         return
     
-    # 2. Распознаём музыку через Shazam
     await status_msg.edit_text("🎵 Распознаю музыку через Shazam...")
     track_name, artist = await recognize_music_shazam(audio_path)
     
-    # Удаляем временный аудиофайл
     if audio_path and os.path.exists(audio_path):
         try:
             os.remove(audio_path)
@@ -1782,7 +1754,6 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         )
         return
     
-    # 3. Ищем на YouTube
     await status_msg.edit_text(f"🎶 Найдено: {track_name} - {artist}\n🔍 Ищу полную версию на YouTube...")
     video_url = await search_youtube_music(track_name, artist)
     
@@ -1794,10 +1765,8 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         )
         return
     
-    # 4. Скачиваем полную версию
     await status_msg.edit_text(f"⬇️ Скачиваю: {track_name} - {artist}...")
     
-    # FIXED: используем get_ffmpeg_path()
     ffmpeg_path = get_ffmpeg_path()
     ffmpeg_available = ffmpeg_path is not None
 
@@ -1845,7 +1814,6 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
                 )
                 await asyncio.wait_for(download_task, timeout=120)
                 
-                # Ищем скачанный аудиофайл
                 audio_file = None
                 for f in os.listdir(tmpdir):
                     full_path = os.path.join(tmpdir, f)
@@ -1872,7 +1840,6 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         logger.error(f"Ошибка скачивания полной версии: {e}")
         await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}")
     
-    # Очищаем запрос
     if audio_id in context.user_data.get('instagram_audio_requests', {}):
         del context.user_data['instagram_audio_requests'][audio_id]
 
@@ -2293,7 +2260,11 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for cid in chat_ids:
         try:
             chat = await context.bot.get_chat(cid)
-            title = chat.title or f"Чат {cid}"
+            # Для приватных чатов показываем имя пользователя
+            if chat.type == Chat.PRIVATE:
+                title = chat.first_name or chat.username or f"Пользователь {cid}"
+            else:
+                title = chat.title or f"Чат {cid}"
         except Exception:
             title = f"Чат {cid}"
         status = "🔴 Отключена" if cid in disabled_chats else "🟢 Активна"
@@ -2301,7 +2272,7 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
 
     await update.message.reply_text(
-        "📋 **Список групп с Luna AI:**\nВыберите группу для управления.",
+        "📋 **Список чатов с Luna AI:**\nВыберите чат для управления.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -2439,7 +2410,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
         await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
-    # === УПРАВЛЕНИЕ ГРУППАМИ (уже было, но теперь и из главного меню) ===
     elif data == "manage_chats":
         await manage_chats(update, context)
     elif data.startswith("chat_manage_"):
@@ -2456,7 +2426,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ФУНКЦИИ УПРАВЛЕНИЯ ГРУППАМИ =====
 async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список всех групп с кнопками управления."""
+    """Показывает список всех чатов с кнопками управления (вызывается по кнопке)."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2465,14 +2435,17 @@ async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_ids = list(chat_members.keys())
     if not chat_ids:
-        await query.edit_message_text("📭 Нет групп, где есть бот.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]))
+        await query.edit_message_text("📭 Нет чатов, где есть бот.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]))
         return
 
     keyboard = []
     for cid in chat_ids:
         try:
             chat = await context.bot.get_chat(cid)
-            title = chat.title or f"Чат {cid}"
+            if chat.type == Chat.PRIVATE:
+                title = chat.first_name or chat.username or f"Пользователь {cid}"
+            else:
+                title = chat.title or f"Чат {cid}"
         except Exception:
             title = f"Чат {cid}"
         status = "🔴 Отключена" if cid in disabled_chats else "🟢 Активна"
@@ -2480,14 +2453,14 @@ async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
 
     await query.edit_message_text(
-        "📋 **Список групп с Luna AI:**\nВыберите группу для управления.",
+        "📋 **Список чатов с Luna AI:**\nВыберите чат для управления.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
     await query.answer()
 
 async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Показывает управление конкретной группой."""
+    """Показывает управление конкретным чатом."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2496,7 +2469,10 @@ async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
 
     try:
         chat = await context.bot.get_chat(chat_id)
-        title = chat.title or f"Чат {chat_id}"
+        if chat.type == Chat.PRIVATE:
+            title = chat.first_name or chat.username or f"Пользователь {chat_id}"
+        else:
+            title = chat.title or f"Чат {chat_id}"
     except Exception:
         title = f"Чат {chat_id}"
 
@@ -2512,7 +2488,7 @@ async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
     keyboard.append([InlineKeyboardButton("🔙 В админ-панель", callback_data="admin_panel")])
 
     await query.edit_message_text(
-        f"📌 **Группа:** {title}\n"
+        f"📌 **Чат:** {title}\n"
         f"🆔 ID: `{chat_id}`\n"
         f"📊 Статус: {status_text}\n\n"
         f"Выберите действие:",
@@ -2522,7 +2498,7 @@ async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
     await query.answer()
 
 async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Отключает бота в группе."""
+    """Отключает бота в чате."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2530,27 +2506,27 @@ async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
         return
 
     if chat_id in disabled_chats:
-        await query.answer("Бот уже отключён в этой группе.")
+        await query.answer("Бот уже отключён в этом чате.")
         return
 
     disabled_chats.add(chat_id)
-    logger.info(f"Бот отключён в группе {chat_id}")
+    logger.info(f"Бот отключён в чате {chat_id}")
 
-    owner_mention = f"@{OWNER_NAME}" if OWNER_NAME else f"ID: {OWNER_USER_ID}"
+    owner_mention = f"@{OWNER_USERNAME}" if OWNER_USERNAME else f"ID: {OWNER_USER_ID}"
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⚠️ Внимание! Владелец бота ({owner_mention}) отключил возможности Luna AI в этой группе.\n\n"
+            text=f"⚠️ Внимание! Владелец бота ({owner_mention}) отключил возможности Luna AI в этом чате.\n\n"
                  f"Для дополнительной информации напишите владельцу."
         )
     except Exception as e:
-        logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
+        logger.error(f"Не удалось отправить уведомление в чат {chat_id}: {e}")
 
-    await query.answer("Бот отключён в этой группе.")
+    await query.answer("Бот отключён в этом чате.")
     await chat_manage(update, context, chat_id)
 
 async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Включает бота в группе."""
+    """Включает бота в чате."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2558,21 +2534,21 @@ async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
         return
 
     if chat_id not in disabled_chats:
-        await query.answer("Бот уже включён в этой группе.")
+        await query.answer("Бот уже включён в этом чате.")
         return
 
     disabled_chats.discard(chat_id)
-    logger.info(f"Бот включён в группе {chat_id}")
+    logger.info(f"Бот включён в чате {chat_id}")
 
     try:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="✅ Luna AI снова активна в этой группе! Все возможности доступны."
+            text="✅ Luna AI снова активна в этом чате! Все возможности доступны."
         )
     except Exception as e:
-        logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
+        logger.error(f"Не удалось отправить уведомление в чат {chat_id}: {e}")
 
-    await query.answer("Бот включён в этой группе.")
+    await query.answer("Бот включён в этом чате.")
     await chat_manage(update, context, chat_id)
 
 # ===== АДМИН-ПАНЕЛЬ (старая) =====
@@ -2585,7 +2561,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔍 Поиск в коде", callback_data="search_code")],
         [InlineKeyboardButton("🧹 Очистить таблицу", callback_data="clear_table_menu")],
         [InlineKeyboardButton("📊 Статистика БД", callback_data="db_stats")],
-        [InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")],
+        [InlineKeyboardButton("📋 Управление чатами", callback_data="manage_chats")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
     ]
     await query.edit_message_text("👑 **Админ панель**\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -2672,12 +2648,11 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     ]
     if OWNER_USER_ID and is_owner(OWNER_USER_ID):
         keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="open_admin_panel")])
-        keyboard.append([InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")])  # <--- НОВАЯ КНОПКА
+        keyboard.append([InlineKeyboardButton("📋 Управление чатами", callback_data="manage_chats")])
     return InlineKeyboardMarkup(keyboard)
 
 # ===== ОСНОВНАЯ ЛОГИКА =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Логируем вызов функции
     logger.info("🔥 handle_message вызвана")
     if update.message:
         logger.info(f"🔥 Сообщение: {update.message.text} от {update.effective_user.id}")
@@ -2704,9 +2679,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # === ПРОВЕРКА: Если группа отключена — игнорируем ===
+        # === Проверка: если чат отключён — игнорируем ===
         if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and chat_id in disabled_chats:
-            logger.info(f"Группа {chat_id} отключена владельцем, сообщение игнорируется.")
+            logger.info(f"Чат {chat_id} отключён владельцем, сообщение игнорируется.")
             return
 
         if await apply_moderation(update, context):
@@ -2719,13 +2694,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if video_path:
                 try:
-                    # Генерируем уникальный ID для ссылки
                     audio_id = uuid.uuid4().hex
                     if 'instagram_audio_requests' not in context.user_data:
                         context.user_data['instagram_audio_requests'] = {}
                     context.user_data['instagram_audio_requests'][audio_id] = text
                     
-                    # Кнопки: скачать аудио ИЛИ найти полную версию
                     keyboard = InlineKeyboardMarkup([
                         [InlineKeyboardButton("🎵 Скачать аудио (из Reels)", callback_data=f"ig_audio_{audio_id}")],
                         [InlineKeyboardButton("🎶 Найти полную версию", callback_data=f"ig_find_full_{audio_id}")]
@@ -3018,7 +2991,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # Википедия для контекста (только если вопрос содержит ключевые слова)
+        # Википедия для контекста
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
@@ -3033,12 +3006,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # Подготовка к AI (БЕЗ ИСТОРИИ, только имя и вопрос)
+        # Подготовка к AI
         global_mode = get_global_mode()
         custom_name = user_info.get('custom_name') if user_info else None
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
 
-        # === НОВЫЙ ПРОМПТ ДЛЯ РЕЖИМА "auto" (адаптивный тон) ===
         mode_prompts = {
             "fast": f"""Ты — Luna AI. Отвечай максимально кратко (1-2 предложения) и точно, но с лёгкой иронией. Без воды. Сарказм приветствуется.
 Пользователь: {user_name}. Вопрос: {text}""",
@@ -3136,7 +3108,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not reply_text or len(reply_text) < 3:
             reply_text = "Не могу придумать ответ. Попробуйте переформулировать вопрос."
 
-        # Удаляем эмодзи (на случай, если они всё же появятся)
         reply_text = re.sub(r'[😀-🙏🌀-🗿]', '', reply_text).strip()
 
         if len(reply_text) > 4000:
@@ -3219,7 +3190,7 @@ def main():
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("groups", groups_command))  # <--- НОВАЯ КОМАНДА
+    application.add_handler(CommandHandler("groups", groups_command))
 
     # === Админ-панель ===
     application.add_handler(CommandHandler("admin", admin_panel_start))
@@ -3246,14 +3217,13 @@ def main():
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
     async def post_init(app: Application):
-        global OWNER_NAME
+        global OWNER_NAME, OWNER_USERNAME
         if OWNER_USER_ID:
             try:
                 chat = await app.bot.get_chat(OWNER_USER_ID)
+                OWNER_NAME = chat.first_name or str(OWNER_USER_ID)
                 if chat.username:
-                    OWNER_NAME = f"{chat.first_name or ''} (@{chat.username})".strip()
-                else:
-                    OWNER_NAME = chat.first_name or str(OWNER_USER_ID)
+                    OWNER_USERNAME = chat.username  # сохраняем чистый юзернейм без @
             except Exception as e:
                 logger.warning(f"Не удалось получить имя владельца: {e}")
                 OWNER_NAME = f"ID: {OWNER_USER_ID}"
@@ -3293,7 +3263,7 @@ def main():
             BotCommand("delnote", "Удалить заметку (id)"),
             BotCommand("broadcast", "Рассылка во все чаты (владелец)"),
             BotCommand("admin", "Админ-панель (владелец)"),
-            BotCommand("groups", "Управление группами (владелец)"),  # <--- НОВАЯ КОМАНДА
+            BotCommand("groups", "Управление чатами (владелец)"),
         ]
         await app.bot.set_my_commands(commands)
         logger.info("✅ Команды установлены")
