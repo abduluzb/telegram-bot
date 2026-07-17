@@ -1,6 +1,6 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
 # Исправлена кнопка "Скачать аудио", добавлен поиск полной версии через Shazam API
-# Добавлено управление группами в админ-панели (отключение/включение бота в группе)
+# Добавлено управление группами в главном меню (отдельная кнопка) и команда /groups
 
 import os
 import asyncio
@@ -2277,6 +2277,35 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
+# ===== НОВАЯ КОМАНДА /groups =====
+async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для управления группами (отдельная кнопка в меню)."""
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Только владелец.")
+        return
+    chat_ids = list(chat_members.keys())
+    if not chat_ids:
+        await update.message.reply_text("📭 Нет групп, где есть бот.")
+        return
+
+    keyboard = []
+    for cid in chat_ids:
+        try:
+            chat = await context.bot.get_chat(cid)
+            title = chat.title or f"Чат {cid}"
+        except Exception:
+            title = f"Чат {cid}"
+        status = "🔴 Отключена" if cid in disabled_chats else "🟢 Активна"
+        keyboard.append([InlineKeyboardButton(f"{title} — {status}", callback_data=f"chat_manage_{cid}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
+
+    await update.message.reply_text(
+        "📋 **Список групп с Luna AI:**\nВыберите группу для управления.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
 # ===== КНОПКИ ГЛАВНОГО МЕНЮ =====
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2410,7 +2439,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
         await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
-    # === НОВЫЕ ОБРАБОТЧИКИ ДЛЯ УПРАВЛЕНИЯ ГРУППАМИ ===
+    # === УПРАВЛЕНИЕ ГРУППАМИ (уже было, но теперь и из главного меню) ===
     elif data == "manage_chats":
         await manage_chats(update, context)
     elif data.startswith("chat_manage_"):
@@ -2441,13 +2470,11 @@ async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = []
     for cid in chat_ids:
-        # Пытаемся получить название чата
         try:
             chat = await context.bot.get_chat(cid)
             title = chat.title or f"Чат {cid}"
         except Exception:
             title = f"Чат {cid}"
-        # Статус (включен/отключен)
         status = "🔴 Отключена" if cid in disabled_chats else "🟢 Активна"
         keyboard.append([InlineKeyboardButton(f"{title} — {status}", callback_data=f"chat_manage_{cid}")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
@@ -2467,7 +2494,6 @@ async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
         await query.edit_message_text("⛔ Доступ запрещён.")
         return
 
-    # Получаем название
     try:
         chat = await context.bot.get_chat(chat_id)
         title = chat.title or f"Чат {chat_id}"
@@ -2510,9 +2536,8 @@ async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
     disabled_chats.add(chat_id)
     logger.info(f"Бот отключён в группе {chat_id}")
 
-    # Отправляем уведомление в группу
+    owner_mention = f"@{OWNER_NAME}" if OWNER_NAME else f"ID: {OWNER_USER_ID}"
     try:
-        owner_mention = f"@{OWNER_NAME}" if OWNER_NAME else f"ID: {OWNER_USER_ID}"
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"⚠️ Внимание! Владелец бота ({owner_mention}) отключил возможности Luna AI в этой группе.\n\n"
@@ -2522,7 +2547,6 @@ async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
         logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
 
     await query.answer("Бот отключён в этой группе.")
-    # Обновляем сообщение с управлением
     await chat_manage(update, context, chat_id)
 
 async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -2540,7 +2564,6 @@ async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
     disabled_chats.discard(chat_id)
     logger.info(f"Бот включён в группе {chat_id}")
 
-    # Отправляем уведомление в группу
     try:
         await context.bot.send_message(
             chat_id=chat_id,
@@ -2550,7 +2573,6 @@ async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_i
         logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
 
     await query.answer("Бот включён в этой группе.")
-    # Обновляем сообщение с управлением
     await chat_manage(update, context, chat_id)
 
 # ===== АДМИН-ПАНЕЛЬ (старая) =====
@@ -2563,7 +2585,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔍 Поиск в коде", callback_data="search_code")],
         [InlineKeyboardButton("🧹 Очистить таблицу", callback_data="clear_table_menu")],
         [InlineKeyboardButton("📊 Статистика БД", callback_data="db_stats")],
-        [InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")],  # <-- НОВАЯ КНОПКА
+        [InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
     ]
     await query.edit_message_text("👑 **Админ панель**\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -2650,6 +2672,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     ]
     if OWNER_USER_ID and is_owner(OWNER_USER_ID):
         keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data="open_admin_panel")])
+        keyboard.append([InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")])  # <--- НОВАЯ КНОПКА
     return InlineKeyboardMarkup(keyboard)
 
 # ===== ОСНОВНАЯ ЛОГИКА =====
@@ -3196,6 +3219,7 @@ def main():
     application.add_handler(CommandHandler("notes", notes_command))
     application.add_handler(CommandHandler("delnote", delnote_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("groups", groups_command))  # <--- НОВАЯ КОМАНДА
 
     # === Админ-панель ===
     application.add_handler(CommandHandler("admin", admin_panel_start))
@@ -3269,6 +3293,7 @@ def main():
             BotCommand("delnote", "Удалить заметку (id)"),
             BotCommand("broadcast", "Рассылка во все чаты (владелец)"),
             BotCommand("admin", "Админ-панель (владелец)"),
+            BotCommand("groups", "Управление группами (владелец)"),  # <--- НОВАЯ КОМАНДА
         ]
         await app.bot.set_my_commands(commands)
         logger.info("✅ Команды установлены")
