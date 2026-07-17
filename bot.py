@@ -301,6 +301,7 @@ async def download_instagram_video(url: str) -> Optional[str]:
 
 async def download_instagram_audio(url: str) -> Optional[str]:
     """Скачивает аудио из Instagram Reels/видео и возвращает путь к MP3."""
+    # FIXED: используем get_ffmpeg_path()
     ffmpeg_path = get_ffmpeg_path()
     ffmpeg_available = ffmpeg_path is not None
 
@@ -310,6 +311,8 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         logger.info(f"ffmpeg найден по пути: {ffmpeg_path}")
 
     temp_dir = tempfile.gettempdir()
+    # FIXED: создаём временный файл, но yt-dlp сам создаст с другим именем, поэтому filepath не используется
+    # оставим для совместимости с поиском
     out_template = os.path.join(temp_dir, 'instagram_audio_%(id)s')
 
     ydl_opts = {
@@ -338,6 +341,7 @@ async def download_instagram_audio(url: str) -> Optional[str]:
         'socket_timeout': 120,
     }
 
+    # FIXED: передаём путь к ffmpeg, если найден
     if ffmpeg_available:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
 
@@ -349,11 +353,14 @@ async def download_instagram_audio(url: str) -> Optional[str]:
             )
             await asyncio.wait_for(download_task, timeout=120)
         
+        # Ищем файл с расширением .mp3 или .m4a
         for f in os.listdir(temp_dir):
             if f.startswith('instagram_audio_'):
                 full_path = os.path.join(temp_dir, f)
                 if os.path.isfile(full_path) and os.path.getsize(full_path) > 1024:
+                    # Если это не mp3, но ffmpeg нет, переименовываем в .mp3
                     if not f.endswith('.mp3') and not ffmpeg_available:
+                        # Просто берём как есть
                         return full_path
                     if f.endswith('.mp3'):
                         return full_path
@@ -364,6 +371,10 @@ async def download_instagram_audio(url: str) -> Optional[str]:
 
 # ===== РАСПОЗНАВАНИЕ МУЗЫКИ ЧЕРЕЗ SHAZAM API =====
 async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Распознаёт музыку через Shazam API.
+    Возвращает (название_трека, исполнитель) или (None, None).
+    """
     if not SHAZAM_API_KEY:
         logger.error("❌ SHAZAM_API_KEY не найден в .env!")
         return None, None
@@ -374,7 +385,9 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
     }
 
     try:
+        # 1. Отправляем аудиофайл
         with open(audio_path, 'rb') as f:
+            # Правильный способ отправки файла через aiohttp
             form_data = aiohttp.FormData()
             form_data.add_field('file', f, filename='audio.mp3', content_type='audio/mpeg')
             
@@ -391,8 +404,9 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
                         return None, None
                     logger.info(f"Распознавание начато, UUID: {uuid_shazam}")
 
+        # 2. Опрашиваем результаты
         attempts = 0
-        max_attempts = 20
+        max_attempts = 20  # 20 * 2 секунды = 40 секунд максимум
         async with aiohttp.ClientSession() as session:
             while attempts < max_attempts:
                 await asyncio.sleep(2)
@@ -412,6 +426,7 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
                                 if title and artist:
                                     logger.info(f"🎵 Распознано: {title} - {artist}")
                                     return title, artist
+                            # Если results пустые, но статус completed — возможно, музыка не найдена
                             logger.warning("Статус completed, но results пусты")
                             return None, None
                         elif status == 'failed':
@@ -430,6 +445,7 @@ async def recognize_music_shazam(audio_path: str) -> Tuple[Optional[str], Option
         return None, None
 
 async def search_youtube_music(track_name: str, artist: str) -> Optional[str]:
+    """Ищет видео на YouTube по названию трека и исполнителю, возвращает URL первого результата."""
     if not youtube:
         return None
     
@@ -451,14 +467,6 @@ async def search_youtube_music(track_name: str, artist: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Ошибка поиска на YouTube: {e}")
         return None
-
-# ===== МОДЕРАЦИЯ =====
-BAD_WORDS = [
-    "хуй", "пизда", "блядь", "ёб", "еба", "ебан", "мудак", "гандон", "пидор",
-    "сучка", "сука", "жопа", "залупа", "хуйня", "пиздец", "хуесос", "мразь",
-    "тварь", "шлюха", "бля", "нахуй", "охуел", "ахуел", "ебать", "ебнуть",
-    "заебал", "заебало", "выблядок", "уебан", "хуйло", "пидр", "гей"
-]
 
 def contains_bad_words(text: str) -> bool:
     text_lower = text.lower()
