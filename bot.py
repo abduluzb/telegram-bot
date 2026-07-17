@@ -1,5 +1,6 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
 # Исправлена кнопка "Скачать аудио", добавлен поиск полной версии через Shazam API
+# Добавлено управление группами в админ-панели (отключение/включение бота в группе)
 
 import os
 import asyncio
@@ -110,6 +111,9 @@ AUTO_MODERATION_ENABLED = True
 pending_requests = {}
 OWNER_NAME = None
 OWNER_DESCRIPTION = "парень с карими глазами, высокий, красивый, умный и обаятельный"
+
+# === Хранилище отключенных групп ===
+disabled_chats: Set[int] = set()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -1252,13 +1256,13 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=cid,
                     photo=photo.file_id,
                     caption=text if text else None,
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             else:
                 await context.bot.send_message(
                     chat_id=cid,
                     text=text,
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             success += 1
         except Exception as e:
@@ -1273,13 +1277,13 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id=OWNER_USER_ID,
                     photo=photo.file_id,
                     caption=f"📢 Копия рассылки:\n{text}" if text else "📢 Копия рассылки (фото)",
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             else:
                 await context.bot.send_message(
                     chat_id=OWNER_USER_ID,
                     text=f"📢 Копия рассылки:\n\n{text}",
-                    parse_mode='Markdown'
+                    parse_mode=None
                 )
             success += 1
         except:
@@ -2406,8 +2410,148 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
         await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
+    # === НОВЫЕ ОБРАБОТЧИКИ ДЛЯ УПРАВЛЕНИЯ ГРУППАМИ ===
+    elif data == "manage_chats":
+        await manage_chats(update, context)
+    elif data.startswith("chat_manage_"):
+        chat_id = int(data.split("_")[2])
+        await chat_manage(update, context, chat_id)
+    elif data.startswith("chat_disable_"):
+        chat_id = int(data.split("_")[2])
+        await chat_disable(update, context, chat_id)
+    elif data.startswith("chat_enable_"):
+        chat_id = int(data.split("_")[2])
+        await chat_enable(update, context, chat_id)
     else:
         await query.edit_message_text("❌ Неизвестная команда")
+
+# ===== ФУНКЦИИ УПРАВЛЕНИЯ ГРУППАМИ =====
+async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список всех групп с кнопками управления."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ Доступ запрещён.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]))
+        return
+
+    chat_ids = list(chat_members.keys())
+    if not chat_ids:
+        await query.edit_message_text("📭 Нет групп, где есть бот.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]]))
+        return
+
+    keyboard = []
+    for cid in chat_ids:
+        # Пытаемся получить название чата
+        try:
+            chat = await context.bot.get_chat(cid)
+            title = chat.title or f"Чат {cid}"
+        except Exception:
+            title = f"Чат {cid}"
+        # Статус (включен/отключен)
+        status = "🔴 Отключена" if cid in disabled_chats else "🟢 Активна"
+        keyboard.append([InlineKeyboardButton(f"{title} — {status}", callback_data=f"chat_manage_{cid}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
+
+    await query.edit_message_text(
+        "📋 **Список групп с Luna AI:**\nВыберите группу для управления.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    await query.answer()
+
+async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Показывает управление конкретной группой."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ Доступ запрещён.")
+        return
+
+    # Получаем название
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        title = chat.title or f"Чат {chat_id}"
+    except Exception:
+        title = f"Чат {chat_id}"
+
+    is_disabled = chat_id in disabled_chats
+    status_text = "🔴 Отключена" if is_disabled else "🟢 Активна"
+
+    keyboard = []
+    if is_disabled:
+        keyboard.append([InlineKeyboardButton("✅ Включить бота", callback_data=f"chat_enable_{chat_id}")])
+    else:
+        keyboard.append([InlineKeyboardButton("❌ Отключить бота", callback_data=f"chat_disable_{chat_id}")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад к списку", callback_data="manage_chats")])
+    keyboard.append([InlineKeyboardButton("🔙 В админ-панель", callback_data="admin_panel")])
+
+    await query.edit_message_text(
+        f"📌 **Группа:** {title}\n"
+        f"🆔 ID: `{chat_id}`\n"
+        f"📊 Статус: {status_text}\n\n"
+        f"Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    await query.answer()
+
+async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Отключает бота в группе."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ Доступ запрещён.")
+        return
+
+    if chat_id in disabled_chats:
+        await query.answer("Бот уже отключён в этой группе.")
+        return
+
+    disabled_chats.add(chat_id)
+    logger.info(f"Бот отключён в группе {chat_id}")
+
+    # Отправляем уведомление в группу
+    try:
+        owner_mention = f"@{OWNER_NAME}" if OWNER_NAME else f"ID: {OWNER_USER_ID}"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"⚠️ Внимание! Владелец бота ({owner_mention}) отключил возможности Luna AI в этой группе.\n\n"
+                 f"Для дополнительной информации напишите владельцу."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
+
+    await query.answer("Бот отключён в этой группе.")
+    # Обновляем сообщение с управлением
+    await chat_manage(update, context, chat_id)
+
+async def chat_enable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Включает бота в группе."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ Доступ запрещён.")
+        return
+
+    if chat_id not in disabled_chats:
+        await query.answer("Бот уже включён в этой группе.")
+        return
+
+    disabled_chats.discard(chat_id)
+    logger.info(f"Бот включён в группе {chat_id}")
+
+    # Отправляем уведомление в группу
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="✅ Luna AI снова активна в этой группе! Все возможности доступны."
+        )
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление в группу {chat_id}: {e}")
+
+    await query.answer("Бот включён в этой группе.")
+    # Обновляем сообщение с управлением
+    await chat_manage(update, context, chat_id)
 
 # ===== АДМИН-ПАНЕЛЬ (старая) =====
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2419,6 +2563,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔍 Поиск в коде", callback_data="search_code")],
         [InlineKeyboardButton("🧹 Очистить таблицу", callback_data="clear_table_menu")],
         [InlineKeyboardButton("📊 Статистика БД", callback_data="db_stats")],
+        [InlineKeyboardButton("📋 Управление группами", callback_data="manage_chats")],  # <-- НОВАЯ КНОПКА
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")],
     ]
     await query.edit_message_text("👑 **Админ панель**\nВыберите действие:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -2535,6 +2680,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = message.text.strip()
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
+
+        # === ПРОВЕРКА: Если группа отключена — игнорируем ===
+        if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and chat_id in disabled_chats:
+            logger.info(f"Группа {chat_id} отключена владельцем, сообщение игнорируется.")
+            return
 
         if await apply_moderation(update, context):
             return
