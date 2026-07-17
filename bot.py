@@ -312,7 +312,7 @@ async def download_instagram_audio(url: str) -> Optional[str]:
     out_template = os.path.join(temp_dir, 'instagram_audio_%(id)s')
 
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1570,7 +1570,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1790,7 +1790,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
