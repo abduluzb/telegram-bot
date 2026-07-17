@@ -1,5 +1,6 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
 # Добавлена поддержка ffmpeg, cookies для YouTube, управление чатами (отдельная кнопка + /groups)
+# Исправлен формат аудио на '140' (m4a) для надёжности
 
 import os
 import asyncio
@@ -312,7 +313,7 @@ async def download_instagram_audio(url: str) -> Optional[str]:
     out_template = os.path.join(temp_dir, 'instagram_audio_%(id)s')
 
     ydl_opts = {
-        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+        'format': 'bestaudio/best',
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1570,7 +1571,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+        'format': '140',   # Исправлено: надёжный m4a-формат
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1790,7 +1791,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format':'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+        'format': '140',   # Исправлено: надёжный m4a-формат
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
