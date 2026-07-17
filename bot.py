@@ -1571,7 +1571,7 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format': '140',   # Исправлено: надёжный m4a-формат
+        'format': 'bestaudio',   # Исправлено: надёжный m4a-формат
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -1791,7 +1791,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         logger.warning("ffmpeg не найден, извлечение аудио может не работать")
 
     ydl_opts = {
-        'format': '140',   # Исправлено: надёжный m4a-формат
+        'format': 'bestaudio',   # Исправлено: надёжный m4a-формат
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
