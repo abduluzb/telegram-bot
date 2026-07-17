@@ -1,6 +1,7 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
 # Добавлена поддержка ffmpeg, cookies для YouTube, управление чатами (отдельная кнопка + /groups)
 # Исправлен формат аудио на '140' (m4a) для надёжности
+# FIX: добавлена переменная BAD_WORDS для модерации
 
 import os
 import asyncio
@@ -120,6 +121,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ===== СПИСОК ЗАПРЕЩЁННЫХ СЛОВ ДЛЯ МОДЕРАЦИИ =====
+# Заполните словами в нижнем регистре, например: ["мат", "ругательство"]
+BAD_WORDS = []  # <-- ИСПРАВЛЕНО: переменная определена
 
 # === Cerebras ===
 client = Cerebras(api_key=CEREBRAS_API_KEY)
