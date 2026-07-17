@@ -1,7 +1,5 @@
 # bot.py - Luna AI с трейлерами (MP4), музыкой, Instagram видео и распознаванием через Shazam
-# Исправлена кнопка "Скачать аудио", добавлен поиск полной версии через Shazam API
-# Добавлено управление группами в главном меню (отдельная кнопка) и команда /groups
-# Исправлено отображение владельца в уведомлениях, улучшен список групп
+# Добавлена поддержка ffmpeg, cookies для YouTube, управление чатами (отдельная кнопка + /groups)
 
 import os
 import asyncio
@@ -107,11 +105,10 @@ if not CEREBRAS_API_KEY:
     raise ValueError("❌ CEREBRAS_API_KEY не найден!")
 
 OWNER_USER_ID = int(os.getenv("OWNER_USER_ID")) if os.getenv("OWNER_USER_ID") else None
-OWNER_USERNAME = os.getenv("OWNER_USERNAME")  # можно задать в .env, иначе заполнится автоматически
 AUTO_MODERATION_ENABLED = True
 
 pending_requests = {}
-OWNER_NAME = None
+OWNER_NAME = None          # будет заполнено в post_init (только юзернейм или имя)
 OWNER_DESCRIPTION = "парень с карими глазами, высокий, красивый, умный и обаятельный"
 
 # === Хранилище отключенных групп ===
@@ -228,14 +225,12 @@ async def notify_owner(context: ContextTypes.DEFAULT_TYPE, text: str):
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление владельцу: {e}")
 
-# ===== FIXED: функция для поиска ffmpeg =====
+# ===== Функция поиска ffmpeg =====
 def get_ffmpeg_path() -> Optional[str]:
     """Возвращает путь к ffmpeg или None, если не найден."""
-    # Сначала через shutil.which
     path = shutil.which('ffmpeg')
     if path:
         return path
-    # Проверяем стандартные пути
     standard_paths = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg']
     for p in standard_paths:
         if os.path.exists(p) and os.access(p, os.X_OK):
@@ -293,7 +288,6 @@ async def download_instagram_video(url: str) -> Optional[str]:
         if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
             return filepath
         else:
-            # Ищем любой файл в /tmp, начинающийся с instagram_
             for f in os.listdir(temp_dir):
                 if f.startswith('instagram_') and f != os.path.basename(filepath):
                     full_path = os.path.join(temp_dir, f)
@@ -456,7 +450,6 @@ async def search_youtube_music(track_name: str, artist: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Ошибка поиска на YouTube: {e}")
         return None
-# ===== КОНЕЦ БЛОКА INSTAGRAM =====
 
 # ===== МОДЕРАЦИЯ =====
 BAD_WORDS = [
@@ -696,7 +689,7 @@ def get_github_file_content(file_path: str) -> Optional[str]:
         logger.error(f"Ошибка получения файла: {e}")
         return None
 
-# ===== АДМИН-ПАНЕЛЬ =====
+# ===== АДМИН-ПАНЕЛЬ (рассылка) =====
 def get_admin_keyboard(text_set: bool = False, photo_set: bool = False) -> InlineKeyboardMarkup:
     keyboard = []
     row1 = []
@@ -1400,6 +1393,13 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         'socket_timeout': 120,
     }
 
+    # Добавляем cookies
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+        logger.info("Используем cookies.txt для YouTube")
+    else:
+        logger.warning("Файл cookies.txt не найден, возможно потребуется аутентификация")
+
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts['outtmpl'] = os.path.join(tmpdir, 'trailer.%(ext)s')
@@ -1454,7 +1454,7 @@ async def trailer_select_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка трейлера: {e}")
         await status_msg.edit_text(f"⚠️ Ошибка: {e}")
 
-# === КОМАНДА МУЗЫКИ (НЕ ТРОГАТЬ!) ===
+# === КОМАНДА МУЗЫКИ ===
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not spotify:
         await update.message.reply_text("❌ Spotify API не настроен. Проверьте .env")
@@ -1530,7 +1530,7 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка музыки: {e}")
         await status_msg.edit_text(f"❌ Ошибка: {e}")
 
-# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) - НЕ ТРОГАТЬ! ===
+# === ОБРАБОТЧИК ВЫБОРА ВИДЕО ИЗ YOUTUBE (скачивание аудио) ===
 async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1598,6 +1598,13 @@ async def music_yt_select_callback(update: Update, context: ContextTypes.DEFAULT
     if ffmpeg_available:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
 
+    # Добавляем cookies
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+        logger.info("Используем cookies.txt для YouTube")
+    else:
+        logger.warning("Файл cookies.txt не найден, возможно потребуется аутентификация")
+
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ydl_opts['outtmpl'] = os.path.join(tmpdir, '%(title)s.%(ext)s')
@@ -1661,6 +1668,7 @@ async def music_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # ===== ОБРАБОТЧИКИ ДЛЯ INSTAGRAM =====
 async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачивает аудио из Instagram по ссылке, сохранённой в user_data."""
     query = update.callback_query
     await query.answer()
     
@@ -1712,6 +1720,7 @@ async def instagram_audio_callback(update: Update, context: ContextTypes.DEFAULT
         )
 
 async def instagram_find_full_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Находит и скачивает полную версию музыки из Instagram Reels через Shazam."""
     query = update.callback_query
     await query.answer()
     
@@ -1730,14 +1739,17 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
     
     status_msg = await query.message.reply_text("🔍 Скачиваю аудио для распознавания...")
     
+    # 1. Скачиваем аудио из Reels
     audio_path = await download_instagram_audio(url)
     if not audio_path:
         await status_msg.edit_text("❌ Не удалось скачать аудио из видео.")
         return
     
+    # 2. Распознаём музыку через Shazam
     await status_msg.edit_text("🎵 Распознаю музыку через Shazam...")
     track_name, artist = await recognize_music_shazam(audio_path)
     
+    # Удаляем временный аудиофайл
     if audio_path and os.path.exists(audio_path):
         try:
             os.remove(audio_path)
@@ -1754,6 +1766,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         )
         return
     
+    # 3. Ищем на YouTube
     await status_msg.edit_text(f"🎶 Найдено: {track_name} - {artist}\n🔍 Ищу полную версию на YouTube...")
     video_url = await search_youtube_music(track_name, artist)
     
@@ -1765,6 +1778,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         )
         return
     
+    # 4. Скачиваем полную версию
     await status_msg.edit_text(f"⬇️ Скачиваю: {track_name} - {artist}...")
     
     ffmpeg_path = get_ffmpeg_path()
@@ -1803,6 +1817,13 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
 
     if ffmpeg_available:
         ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+    # Добавляем cookies
+    if os.path.exists('cookies.txt'):
+        ydl_opts['cookiefile'] = 'cookies.txt'
+        logger.info("Используем cookies.txt для YouTube")
+    else:
+        logger.warning("Файл cookies.txt не найден, возможно потребуется аутентификация")
     
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1840,6 +1861,7 @@ async def instagram_find_full_callback(update: Update, context: ContextTypes.DEF
         logger.error(f"Ошибка скачивания полной версии: {e}")
         await status_msg.edit_text(f"❌ Ошибка при скачивании: {e}")
     
+    # Очищаем запрос
     if audio_id in context.user_data.get('instagram_audio_requests', {}):
         del context.user_data['instagram_audio_requests'][audio_id]
 
@@ -2244,23 +2266,22 @@ async def owners_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Владелец не задан.")
 
-# ===== НОВАЯ КОМАНДА /groups =====
+# ===== КОМАНДА ДЛЯ УПРАВЛЕНИЯ ЧАТАМИ =====
 async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда для управления группами (отдельная кнопка в меню)."""
+    """Команда /groups — управление чатами (только владелец)."""
     user_id = update.effective_user.id
     if not is_owner(user_id):
         await update.message.reply_text("⛔ Только владелец.")
         return
     chat_ids = list(chat_members.keys())
     if not chat_ids:
-        await update.message.reply_text("📭 Нет групп, где есть бот.")
+        await update.message.reply_text("📭 Нет чатов, где есть бот.")
         return
 
     keyboard = []
     for cid in chat_ids:
         try:
             chat = await context.bot.get_chat(cid)
-            # Для приватных чатов показываем имя пользователя
             if chat.type == Chat.PRIVATE:
                 title = chat.first_name or chat.username or f"Пользователь {cid}"
             else:
@@ -2343,6 +2364,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
+    # === Обработчики главного меню ===
     if data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -2410,6 +2432,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🎵 Напиши /music <название песни>", reply_markup=get_main_menu_keyboard())
     elif data == "trailer":
         await query.edit_message_text("🎬 Напиши /trailer <название фильма>", reply_markup=get_main_menu_keyboard())
+    # === Управление чатами ===
     elif data == "manage_chats":
         await manage_chats(update, context)
     elif data.startswith("chat_manage_"):
@@ -2424,9 +2447,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("❌ Неизвестная команда")
 
-# ===== ФУНКЦИИ УПРАВЛЕНИЯ ГРУППАМИ =====
+# ===== ФУНКЦИИ УПРАВЛЕНИЯ ЧАТАМИ =====
 async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает список всех чатов с кнопками управления (вызывается по кнопке)."""
+    """Показывает список чатов (вызывается по кнопке)."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2460,7 +2483,7 @@ async def manage_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
 async def chat_manage(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Показывает управление конкретным чатом."""
+    """Управление конкретным чатом."""
     query = update.callback_query
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -2512,7 +2535,7 @@ async def chat_disable(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_
     disabled_chats.add(chat_id)
     logger.info(f"Бот отключён в чате {chat_id}")
 
-    owner_mention = f"@{OWNER_USERNAME}" if OWNER_USERNAME else f"ID: {OWNER_USER_ID}"
+    owner_mention = f"@{OWNER_NAME}" if OWNER_NAME and OWNER_NAME.startswith('@') else f"@{OWNER_NAME}" if OWNER_NAME else f"ID: {OWNER_USER_ID}"
     try:
         await context.bot.send_message(
             chat_id=chat_id,
@@ -3217,13 +3240,14 @@ def main():
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
     async def post_init(app: Application):
-        global OWNER_NAME, OWNER_USERNAME
+        global OWNER_NAME
         if OWNER_USER_ID:
             try:
                 chat = await app.bot.get_chat(OWNER_USER_ID)
-                OWNER_NAME = chat.first_name or str(OWNER_USER_ID)
                 if chat.username:
-                    OWNER_USERNAME = chat.username  # сохраняем чистый юзернейм без @
+                    OWNER_NAME = f"@{chat.username}"
+                else:
+                    OWNER_NAME = chat.first_name or str(OWNER_USER_ID)
             except Exception as e:
                 logger.warning(f"Не удалось получить имя владельца: {e}")
                 OWNER_NAME = f"ID: {OWNER_USER_ID}"
