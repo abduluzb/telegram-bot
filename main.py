@@ -2,7 +2,7 @@ import asyncio
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatJoinRequestHandler, filters
 
-from config import TELEGRAM_TOKEN, OWNER_USER_ID, OWNER_NAME, logger, SHAZAM_API_KEY, AUDD_API_KEY
+from config import TELEGRAM_TOKEN, OWNER_USER_ID, OWNER_NAME, logger, SHAZAM_API_KEY
 from database import init_db, get_all_chat_ids
 from utils import check_reminders, chat_members
 from handlers import (
@@ -77,7 +77,7 @@ def main():
     # === Запросы на вступление ===
     application.add_handler(ChatJoinRequestHandler(join_request_callback))
 
-    async def post_init(app: Application):
+    async def post_init(app):
         global OWNER_NAME
         if OWNER_USER_ID:
             try:
@@ -86,15 +86,12 @@ def main():
                     OWNER_NAME = f"@{chat.username}"
                 else:
                     OWNER_NAME = chat.first_name or str(OWNER_USER_ID)
-                logger.info(f"👑 Владелец: {OWNER_NAME} (ID: {OWNER_USER_ID})")
             except Exception as e:
                 logger.warning(f"Не удалось получить имя владельца: {e}")
                 OWNER_NAME = f"ID: {OWNER_USER_ID}"
         else:
             OWNER_NAME = None
-            logger.warning("⚠️ Владелец не установлен (OWNER_USER_ID отсутствует)")
 
-        from database import get_all_chat_ids
         chat_ids = get_all_chat_ids()
         for cid in chat_ids:
             if cid not in chat_members:
@@ -135,13 +132,19 @@ def main():
         asyncio.create_task(check_reminders(app))
         logger.info("✅ Задача напоминаний запущена")
 
+        if OWNER_USER_ID:
+            logger.info(f"👑 Владелец: {OWNER_NAME} (ID: {OWNER_USER_ID})")
+        else:
+            logger.warning("⚠️ Владелец не установлен")
+
     application.post_init = post_init
 
-    logger.info("🚀 Luna AI запущен!")
+    logger.info("🚀 Luna AI запущен с трейлерами (MP4), музыкой, Instagram видео и Shazam!")
     logger.info("💬 Глобальный режим: fast/smart/sarcastic/flirt/auto")
     logger.info("🎵 Spotify: подключен" if spotify else "🎵 Spotify: не подключен")
     logger.info("🎬 YouTube: подключен" if youtube else "🎬 YouTube: не подключен")
-    logger.info("🎵 Audd.io: " + ("подключен" if AUDD_API_KEY else "НЕ НАСТРОЕН!"))
+    logger.info("📥 Instagram: видео + кнопки аудио и полной версии через Shazam")
+    logger.info("🎵 Shazam API: " + ("подключен" if SHAZAM_API_KEY else "НЕ НАСТРОЕН!"))
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,

@@ -1,4 +1,3 @@
-# config.py
 import os
 import logging
 from typing import Set, Dict, List, Optional
