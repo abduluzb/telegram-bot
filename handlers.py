@@ -17,11 +17,10 @@ from config import (
     OWNER_NAME,
     OWNER_DESCRIPTION,
     pending_requests,
-    MODELS,
     disabled_chats,
     SHAZAM_API_KEY,
     WEATHER_API_KEY,
-    AUTO_MODERATION_ENABLED   # <-- добавлено
+    AUTO_MODERATION_ENABLED
 )
 from utils import (
     get_chat_members,
@@ -37,10 +36,10 @@ from utils import (
     get_wikipedia_summary,
     search_github_code,
     get_github_file_content,
-    last_request_time,         # <-- добавлено
-    user_names                 # <-- добавлено
+    last_request_time,
+    user_names
 )
-from api_clients import client, youtube, spotify
+from api_clients import ai_clients, youtube, spotify
 from database import (
     get_global_mode,
     set_global_mode,
@@ -78,7 +77,7 @@ from database import (
     get_detailed_stats,
     get_top_users
 )
-from moderation import apply_moderation, contains_bad_words
+from moderation import apply_moderation, contains_bad_words, get_ban_duration
 from instagram import (
     is_instagram_url,
     download_instagram_video,
@@ -245,8 +244,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    all_chats = list(get_chat_members(0).keys())  # используем get_chat_members для доступа к словарю
-    # На самом деле нужно брать chat_members из utils, но у нас есть глобальная переменная, можно импортировать напрямую
     from utils import chat_members
     all_chats = list(chat_members.keys())
     if not all_chats:
@@ -829,7 +826,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"❌ Ошибка: {e}")
         return
 
-    # Обработчики главного меню
     if data == "weather":
         await query.edit_message_text("🌍 Напиши /weather <город>", reply_markup=get_main_menu_keyboard())
     elif data == "imagine":
@@ -942,7 +938,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_lower = text.lower()
         logger.info(f"📨 Получено сообщение от {user_name} ({user_id}): {text[:50]}...")
 
-        # Проверка: если чат отключён — игнорируем
         if chat_type in [Chat.GROUP, Chat.SUPERGROUP] and chat_id in disabled_chats:
             logger.info(f"Чат {chat_id} отключён владельцем, сообщение игнорируется.")
             return
@@ -1163,13 +1158,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"role": "user", "content": f"Вот код файла {file_path}:\n\n{content_for_ai}\n\nОбъясни, что он делает."}
                 ]
                 try:
+                    if not ai_clients:
+                        await status_msg.edit_text("❌ Нет доступных AI-провайдеров.")
+                        return
                     response = await asyncio.wait_for(
                         asyncio.get_event_loop().run_in_executor(
                             None,
-                            lambda: client.chat.completions.create(
-                                model=MODELS[0],
+                            lambda: ai_clients[0]["client"].chat.completions.create(
+                                model=ai_clients[0]["model"],
                                 messages=messages,
-                                max_tokens=800,
+                                max_completion_tokens=800,
                                 temperature=0.5
                             )
                         ),
@@ -1219,7 +1217,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("Владелец не задан.")
             return
 
-        # Определяем, нужно ли отвечать (AI)
         should_reply = False
         if chat_type == Chat.PRIVATE:
             should_reply = True
@@ -1254,13 +1251,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             text = "Продолжай."
 
-        # Википедия для контекста
         if re.search(r'(кто|что|где|когда|как|почему|какой|сколько|в каком году|название|определение|значение|является|находится|известен|создан|основан|построен|родился|умер|произошёл|произошло)', text_lower):
             wiki_info = await get_wikipedia_summary(text)
             if wiki_info:
                 text = f"{text}\n\nДополнительная информация из Википедии:\n{wiki_info}\nОтветь на вопрос, используя эти данные."
 
-        # Анти-спам
         current_time = time.time()
         if user_id in last_request_time and current_time - last_request_time[user_id] < 2:
             await message.reply_text("Пожалуйста, не спамь, дай подумать.")
@@ -1269,7 +1264,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await message.chat.send_action(action="typing")
 
-        # Подготовка к AI
         global_mode = get_global_mode()
         custom_name = user_info.get('custom_name') if user_info else None
         location = "личном чате" if chat_type == Chat.PRIVATE else "группе"
@@ -1354,37 +1348,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         thinking_msg = await message.reply_text("⚡ Думаю...")
         reply_text = None
         last_error = None
-        temperature = 1.0 if global_mode in ["sarcastic", "flirt"] else 0.8
 
-        for model_name in MODELS:
+        if not ai_clients:
+            await thinking_msg.edit_text("❌ Нет доступных AI-провайдеров. Проверьте API-ключи.")
+            return
+
+        for client_info in ai_clients:
             try:
                 response = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: client.chat.completions.create(
-                            model=model_name,
+                        lambda ci=client_info: ci["client"].chat.completions.create(
+                            model=ci["model"],
                             messages=messages,
-                            max_tokens=350,
-                            temperature=temperature
+                            max_completion_tokens=ci["max_tokens"],
+                            temperature=ci["temperature"],
                         )
                     ),
-                    timeout=15.0
+                    timeout=20.0
                 )
                 if response.choices and response.choices[0].message.content:
                     reply_text = response.choices[0].message.content.strip()
                     if reply_text and len(reply_text) > 2:
-                        logger.info(f"✅ Ответ от {model_name}")
+                        logger.info(f"✅ Ответ от {client_info['name']} (модель {client_info['model']})")
                         break
                     else:
-                        logger.warning(f"Пустой или слишком короткий ответ от {model_name}")
+                        logger.warning(f"Пустой ответ от {client_info['name']}")
                         continue
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"❌ Ошибка {model_name}: {e}")
-                await asyncio.sleep(1)
+                logger.warning(f"❌ Ошибка {client_info['name']}: {e}")
+                continue
 
         if not reply_text or len(reply_text) < 3:
-            reply_text = "Не могу придумать ответ. Попробуйте переформулировать вопрос."
+            reply_text = "Не могу придумать ответ. Попробуйте переформулировать вопрос или повторите позже."
 
         reply_text = re.sub(r'[😀-🙏🌀-🗿]', '', reply_text).strip()
 
